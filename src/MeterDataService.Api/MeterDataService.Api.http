@@ -1,0 +1,6 @@
+@MeterDataService.Api_HostAddress = http://localhost:5227
+
+GET {{MeterDataService.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
