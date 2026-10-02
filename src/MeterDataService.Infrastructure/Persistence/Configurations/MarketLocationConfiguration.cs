@@ -12,6 +12,7 @@ internal sealed class MarketLocationConfiguration : IEntityTypeConfiguration<Mar
         builder.Property(m => m.Id).ValueGeneratedNever();
 
         builder.Property(m => m.MaLoId)
+            .HasColumnName("malo_id")
             .HasMaxLength(MarketLocationId.Length)
             .IsFixedLength();
         builder.HasIndex(m => m.MaLoId).IsUnique();

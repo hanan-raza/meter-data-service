@@ -48,7 +48,42 @@ graph TD
     G --> H[DataQualityScore]
 ```
 
-_See `docs/architecture.md` for detailed component descriptions._
+### Data model
+
+```mermaid
+erDiagram
+    MARKET_LOCATION ||--o{ METER_LOCATION : "is measured at"
+    METER_LOCATION ||--o{ METER : "has installed (over time)"
+    METER_LOCATION ||--o{ MEASUREMENT_SERIES : "records"
+    MEASUREMENT_SERIES ||--o{ MEASUREMENT_VALUE : "contains"
+    MARKET_LOCATION {
+        uuid id
+        char malo_id
+        string direction
+    }
+    METER_LOCATION {
+        uuid id
+        char melo_id
+    }
+    METER {
+        uuid id
+        string serial_number
+        timestamptz installed_at
+        timestamptz removed_at
+    }
+    MEASUREMENT_SERIES {
+        uuid id
+        string obis_code
+    }
+    MEASUREMENT_VALUE {
+        bigint id
+        timestamptz interval_start
+        numeric value
+        string status
+    }
+```
+
+Domain entities live in `MeterDataService.Domain` and guard their own invariants (valid MaLo/MeLo IDs with check digit, one installed meter per meter location, 15-minute aligned UTC interval starts, at most 5 decimal places). `MeterDataService.Infrastructure` maps them to PostgreSQL with EF Core: energy values as `numeric(18,5)`, timestamps as `timestamptz`, and a unique index on `(measurement_series_id, interval_start)`.
 
 ---
 
@@ -56,8 +91,12 @@ _See `docs/architecture.md` for detailed component descriptions._
 
 ```bash
 docker compose up -d
+dotnet tool restore
+dotnet dotnet-ef database update --project src/MeterDataService.Infrastructure --startup-project src/MeterDataService.Api
 dotnet run --project src/MeterDataService.Api
 ```
+
+The development connection string (`ConnectionStrings:MeterData` in `appsettings.Development.json`) matches the credentials in `docker-compose.yml`.
 
 Example request:
 
@@ -73,9 +112,13 @@ See `docs/requests.http` for a full set of example requests.
 
 | German | English | Explanation |
 |--------|---------|-------------|
-| Marktlokation (MaLo) | Market location | The billing point for energy delivery; identified by a 33-digit ID |
-| Messlokation (MeLo) | Meter location | The physical measurement point; one MeLo can feed multiple MaLos |
+| Marktlokation (MaLo) | Market location | The billing point for energy delivery; identified by an 11-digit ID with check digit |
+| Messlokation (MeLo) | Meter location | The physical measurement point; identified by a 33-character ID starting with the country code |
+| Zähler | Meter | The physical device; replaced over time (Zählerwechsel) while the meter location stays |
 | Zählerstand | Meter reading | Cumulative counter value at a point in time |
+| OBIS-Kennzahl | OBIS code | Identifies the measured quantity, e.g. `1-1:1.29.0` for consumed energy per interval |
+| Messwertstatus | Measurement status | Whether a value is measured, estimated or replaced (`Measured`, `Estimated`, `Replaced`) |
+| Einspeisung / Ausspeisung | Generation / consumption | Energy direction of a market location |
 | Lastgang | Load profile | Time-series of interval (15-min) consumption values |
 | Ersatzwertbildung | Gap filling | Substituting missing or invalid readings with estimated values |
 | Messstellenbetreiber (MSB) | Metering point operator | Responsible for meter hardware and data delivery |
@@ -90,6 +133,8 @@ dotnet test
 ```
 
 Coverage highlights:
+- Domain invariants: MaLo check digit, MeLo format, meter exchange rules, 15-minute alignment
+- Persistence model: column types (`numeric(18,5)`, `timestamptz`), unique keys, migrations in sync with the model — checked without a database
 - DST transition correctness: 23-hour and 25-hour days
 - Rounding: `decimal` arithmetic, no floating-point for energy quantities
 - Gap filling: identical results regardless of input ordering
@@ -100,6 +145,8 @@ Coverage highlights:
 ## Design Decisions
 
 See `docs/adr/` for Architecture Decision Records.
+
+- [ADR 0001 — Persistence model for interval meter data](docs/adr/0001-persistence-model-for-interval-data.md): `decimal(18,5)`, UTC `timestamptz`, UUIDv7 keys, 1:n MaLo–MeLo simplification
 
 ---
 

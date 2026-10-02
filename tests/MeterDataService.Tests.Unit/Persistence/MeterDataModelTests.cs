@@ -82,6 +82,13 @@ public sealed class MeterDataModelTests : IDisposable
             .FindProperty(nameof(MeasurementValue.IntervalEnd)).ShouldBeNull();
     }
 
+    [Fact]
+    public void Migrations_are_in_sync_with_the_model()
+    {
+        // Fails when a configuration changes without a new migration being added.
+        _context.Database.HasPendingModelChanges().ShouldBeFalse();
+    }
+
     private string? Column<TEntity>(string property) =>
         Model.FindEntityType(typeof(TEntity))!.FindProperty(property)!.GetColumnType();
 }

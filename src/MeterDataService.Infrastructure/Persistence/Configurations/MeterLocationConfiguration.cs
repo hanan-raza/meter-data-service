@@ -12,6 +12,7 @@ internal sealed class MeterLocationConfiguration : IEntityTypeConfiguration<Mete
         builder.Property(m => m.Id).ValueGeneratedNever();
 
         builder.Property(m => m.MeLoId)
+            .HasColumnName("melo_id")
             .HasMaxLength(MeterLocationId.Length)
             .IsFixedLength();
         builder.HasIndex(m => m.MeLoId).IsUnique();

@@ -24,6 +24,10 @@ csharp_indent_case_contents = true
 csharp_space_after_cast = false
 csharp_prefer_braces = true:warning
 
+# EF Core migrations are tool-generated; analyzer rules don't apply.
+[src/**/Migrations/*.cs]
+generated_code = true
+
 # Test names read as sentences (Method_condition_expectation).
 [tests/**.cs]
 dotnet_diagnostic.CA1707.severity = none
