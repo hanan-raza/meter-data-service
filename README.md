@@ -129,12 +129,16 @@ See `docs/requests.http` for a full set of example requests.
 ## Testing
 
 ```bash
-dotnet test
+dotnet test                                  # unit + integration tests
+dotnet test --filter Category=Integration    # only the PostgreSQL integration tests
 ```
+
+Integration tests use [Testcontainers](https://dotnet.testcontainers.org/). They need a running Docker engine and no other setup: no `docker compose up`, no connection string. Each test class gets its own `postgres:17` container, and the real EF Core migrations are applied to it (`IntegrationTestBase` + `PostgreSqlFixture`). If Docker isn't available, the integration tests are **skipped** locally. With the `CI` environment variable set (GitHub Actions sets it), they **fail**, so a broken pipeline can't pass silently.
 
 Coverage highlights:
 - Domain invariants: MaLo check digit, MeLo format, meter exchange rules, 15-minute alignment
 - Persistence model: column types (`numeric(18,5)`, `timestamptz`), unique keys, migrations in sync with the model — checked without a database
+- Against real PostgreSQL: migrations apply to an empty database; a `MeasurementValue` round-trips with all 5 decimals and a UTC timestamp; the repeated local 02:00 hour on the fall-back day is stored as two distinct intervals
 - DST transition correctness: 23-hour and 25-hour days
 - Rounding: `decimal` arithmetic, no floating-point for energy quantities
 - Gap filling: identical results regardless of input ordering
