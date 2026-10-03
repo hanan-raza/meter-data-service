@@ -8,21 +8,9 @@ on:
 
 jobs:
   build-and-test:
+    # No database service: integration tests start their own PostgreSQL containers via
+    # Testcontainers, using the Docker engine preinstalled on the runner.
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: mds
-          POSTGRES_PASSWORD: mds_dev
-          POSTGRES_DB: meter_data
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -40,8 +28,6 @@ jobs:
 
       - name: Test
         run: dotnet test --no-build --configuration Release --logger "trx;LogFileName=results.trx" --results-directory ./TestResults
-        env:
-          ConnectionStrings__MeterData: "Host=localhost;Port=5432;Database=meter_data;Username=mds;Password=mds_dev"
 
       - name: Upload test results
         if: always()
