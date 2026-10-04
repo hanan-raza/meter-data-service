@@ -85,6 +85,16 @@ erDiagram
 
 Domain entities live in `MeterDataService.Domain` and guard their own invariants (valid MaLo/MeLo IDs with check digit, one installed meter per meter location, 15-minute aligned UTC interval starts, at most 5 decimal places). `MeterDataService.Infrastructure` maps them to PostgreSQL with EF Core: energy values as `numeric(18,5)`, timestamps as `timestamptz`, and a unique index on `(measurement_series_id, interval_start)`.
 
+### Synthetic data
+
+`SyntheticProfileGenerator` (`MeterDataService.Application`) produces realistic 15-minute series for any range of German calendar days:
+
+- **Household (H0)**: hourly weekday/Saturday/Sunday shapes plus the H0 dynamization polynomial (more load in winter), scaled to a given annual consumption.
+- **Commercial**: a flat base load (Bandlast) with ±5 % noise.
+- **PV feed-in**: a sine-shaped day around solar noon in UTC, so production doesn't jump by an hour at the DST switch. Day length and peak height follow the season, and a random cloud factor applies per day.
+
+Defects arrive the way they do from the field: gaps are missing intervals (default 0.5 %), spikes are values multiplied by 4–8× that still carry status `Measured` (default 0.2 %). With a fixed `Seed`, a series can be reproduced exactly, and changing a probability doesn't change the undisturbed values.
+
 ---
 
 ## Quick Start
@@ -123,6 +133,8 @@ See `docs/requests.http` for a full set of example requests.
 | Ersatzwertbildung | Gap filling | Substituting missing or invalid readings with estimated values |
 | Messstellenbetreiber (MSB) | Metering point operator | Responsible for meter hardware and data delivery |
 | Standardlastprofil (SLP) | Standard load profile | Synthetic daily shape (H0 = household, G0 = general commerce) |
+| Dynamisierung | Dynamization | Seasonal scaling of the H0 profile by day of year (more load in winter) |
+| Bandlast | Base load | Constant load over the whole day |
 
 ---
 
@@ -139,7 +151,8 @@ Coverage highlights:
 - Domain invariants: MaLo check digit, MeLo format, meter exchange rules, 15-minute alignment
 - Persistence model: column types (`numeric(18,5)`, `timestamptz`), unique keys, migrations in sync with the model — checked without a database
 - Against real PostgreSQL: migrations apply to an empty database; a `MeasurementValue` round-trips with all 5 decimals and a UTC timestamp; the repeated local 02:00 hour on the fall-back day is stored as two distinct intervals
-- DST transition correctness: 23-hour and 25-hour days
+- DST transition correctness: 23-hour and 25-hour days. The synthetic generator yields 96 / 92 / 100 intervals for a normal / spring-forward / fall-back day for all three profiles.
+- Synthetic profiles: H0 annual energy matches the requested consumption, PV is zero at night and stays centred on solar noon across the clock change, gap and spike rates match the configured probabilities
 - Rounding: `decimal` arithmetic, no floating-point for energy quantities
 - Gap filling: identical results regardless of input ordering
 - Anomaly detection: known spike sequences always flagged
