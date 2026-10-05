@@ -19,8 +19,6 @@ public sealed class SyntheticProfileGenerator
     private const double MaxSpikeFactor = 8;
     private const int QuarterHoursPerYear = 365 * 96;
 
-    private static readonly TimeZoneInfo Berlin = TimeZoneInfo.FindSystemTimeZoneById("Europe/Berlin");
-
     // Hourly household shapes (local time) loosely following the published H0 profile:
     // low night load, morning ramp, lunch peak, pronounced evening peak.
     private static readonly double[] HouseholdWeekday =
@@ -56,7 +54,7 @@ public sealed class SyntheticProfileGenerator
 
         return Generate(seriesId, firstDay, lastDay, rng => utc =>
         {
-            var local = TimeZoneInfo.ConvertTime(utc, Berlin);
+            var local = TimeZoneInfo.ConvertTime(utc, GermanCalendar.TimeZone);
             var shape = local.DayOfWeek switch
             {
                 DayOfWeek.Saturday => HouseholdSaturday,
@@ -135,9 +133,9 @@ public sealed class SyntheticProfileGenerator
             // Created per enumeration so a seeded series is identical every time it is enumerated.
             var rng = _options.Seed is { } seed ? new Random(seed) : new Random();
             var energyAt = profile(rng);
-            var end = LocalMidnightUtc(lastDay.AddDays(1));
+            var end = GermanCalendar.StartOfDayUtc(lastDay.AddDays(1));
 
-            for (var utc = LocalMidnightUtc(firstDay); utc < end; utc += MeasurementSeries.IntervalLength)
+            for (var utc = GermanCalendar.StartOfDayUtc(firstDay); utc < end; utc += MeasurementSeries.IntervalLength)
             {
                 // Always draw all three rolls so changing a probability doesn't reshuffle the underlying profile.
                 var isGap = rng.NextDouble() < _options.GapProbability;
@@ -159,13 +157,6 @@ public sealed class SyntheticProfileGenerator
                 yield return new MeasurementValue(seriesId, utc, value, MeasurementStatus.Measured);
             }
         }
-    }
-
-    private static DateTimeOffset LocalMidnightUtc(DateOnly day)
-    {
-        // Midnight is never skipped or repeated in Germany (switches happen at 02:00/03:00), so the offset is unambiguous.
-        var midnight = day.ToDateTime(TimeOnly.MinValue);
-        return new DateTimeOffset(midnight, Berlin.GetUtcOffset(midnight)).ToUniversalTime();
     }
 
     /// <summary>Published fourth-order dynamization polynomial of the H0 profile: higher load in winter, lower in summer.</summary>

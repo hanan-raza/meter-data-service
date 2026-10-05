@@ -95,6 +95,33 @@ Domain entities live in `MeterDataService.Domain` and guard their own invariants
 
 Defects arrive the way they do from the field: gaps are missing intervals (default 0.5 %), spikes are values multiplied by 4–8× that still carry status `Measured` (default 0.2 %). With a fixed `Seed`, a series can be reproduced exactly, and changing a probability doesn't change the undisturbed values.
 
+### CSV import and validation
+
+`CsvImportParser` (CsvHelper) reads files with the columns `timestamp`, `value` (kWh) and `status`:
+
+```csv
+timestamp;value;status
+2026-10-25T02:00:00+02:00;0,412;Measured
+2026-10-25T02:00:00+01:00;0,398;Measured
+2026-10-25 03:00;0.405;Estimated
+```
+
+- Comma or semicolon separator, decimal point or decimal comma, any column order, case-insensitive header and status.
+- Timestamps are the interval start in ISO 8601. With an offset (or `Z`) they are unambiguous. Without one they are German local time: the repeated 02:00 hour on the fall-back day is assigned by order (first summer time, then winter time), and local times skipped in spring are errors.
+- A malformed row (bad timestamp, not on a quarter hour, more than 5 decimals, unknown status) becomes an error with its line number. The rest of the file is still read.
+
+`ValidationEngine` then checks the readings over a period of German calendar days. It never changes a value. Every reading gets a `ValidationResult` (`Ok`, `Warning`, `Rejected`) with the rule and a plain-language reason:
+
+| Rule | Level | Outcome |
+|------|-------|---------|
+| Negative value | value | Rejected |
+| Spike: value > 3× the median of the surrounding hour (±2 intervals) | value | Rejected |
+| Duplicate interval (first value is kept) / outside the period | value | Rejected |
+| Missing intervals: every absent interval is listed, one finding per contiguous gap | period | Warning |
+| DST day with an interval count other than 92 / 100, e.g. a sender that ignored the clock change | period | Warning |
+
+The spike check uses the median of the neighbours, so one outlier can't hide another next to it. It is skipped when the median is zero (PV at night), because a ratio to zero means nothing.
+
 ---
 
 ## Quick Start
@@ -135,6 +162,8 @@ See `docs/requests.http` for a full set of example requests.
 | Standardlastprofil (SLP) | Standard load profile | Synthetic daily shape (H0 = household, G0 = general commerce) |
 | Dynamisierung | Dynamization | Seasonal scaling of the H0 profile by day of year (more load in winter) |
 | Bandlast | Base load | Constant load over the whole day |
+| Plausibilisierung | Validation | Checking delivered values against plausibility rules before they are used |
+| Zeitumstellung | Clock change | Switch to/from summer time; makes a market day 23 or 25 hours long |
 
 ---
 
@@ -153,6 +182,8 @@ Coverage highlights:
 - Against real PostgreSQL: migrations apply to an empty database; a `MeasurementValue` round-trips with all 5 decimals and a UTC timestamp; the repeated local 02:00 hour on the fall-back day is stored as two distinct intervals
 - DST transition correctness: 23-hour and 25-hour days. The synthetic generator yields 96 / 92 / 100 intervals for a normal / spring-forward / fall-back day for all three profiles.
 - Synthetic profiles: H0 annual energy matches the requested consumption, PV is zero at night and stays centred on solar noon across the clock change, gap and spike rates match the configured probabilities
+- CSV import: offset and local timestamps, the repeated hour on the fall-back day (100 rows → 100 distinct UTC intervals), skipped spring local times, per-line errors, semicolon + decimal comma
+- Validation: all rule types (negative, spike, duplicate, outside period, missing intervals, DST interval count). A known spike in a CSV is rejected, a gap gives the exact missing-interval count, a 96-row fall-back day is flagged. Every spike injected by the synthetic generator is rejected, with no false positives on clean household, commercial and PV series (incl. sunrise ramps).
 - Rounding: `decimal` arithmetic, no floating-point for energy quantities
 - Gap filling: identical results regardless of input ordering
 - Anomaly detection: known spike sequences always flagged
