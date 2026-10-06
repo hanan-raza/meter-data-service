@@ -1,3 +1,4 @@
+using MeterDataService.Application;
 using MeterDataService.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -5,6 +6,7 @@ var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("MeterData")
     ?? throw new InvalidOperationException("Connection string 'MeterData' is not configured.");
 
+builder.Services.AddApplication();
 builder.Services.AddInfrastructure(connectionString);
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
