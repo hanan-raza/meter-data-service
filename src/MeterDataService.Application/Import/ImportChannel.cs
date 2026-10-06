@@ -3,7 +3,7 @@ using System.Threading.Channels;
 namespace MeterDataService.Application.Import;
 
 /// <summary>
-/// Queue between the upload endpoint and the background import, registered as a singleton.
+/// Queue between the upload endpoint and <see cref="ImportBackgroundService"/>, registered as a singleton.
 /// </summary>
 /// <remarks>
 /// The default channel is bounded: when imports arrive faster than they are processed, <see cref="TryEnqueue"/>

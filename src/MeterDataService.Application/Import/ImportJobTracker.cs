@@ -14,7 +14,8 @@ public sealed class ImportJobTracker(TimeProvider timeProvider)
 {
     private readonly ConcurrentDictionary<Guid, ImportJobStatus> _jobs = new();
 
-    public void MarkQueued(ImportJob job)
+    /// <returns>The queued status; later reads may already show the job further along.</returns>
+    public ImportJobStatus MarkQueued(ImportJob job)
     {
         ArgumentNullException.ThrowIfNull(job);
 
@@ -23,6 +24,8 @@ public sealed class ImportJobTracker(TimeProvider timeProvider)
         {
             throw new InvalidOperationException($"Import job {job.Id} is already tracked.");
         }
+
+        return status;
     }
 
     public void MarkProcessing(Guid jobId) =>

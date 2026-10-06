@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using MeterDataService.Application;
 using MeterDataService.Infrastructure;
 
@@ -8,7 +9,8 @@ var connectionString = builder.Configuration.GetConnectionString("MeterData")
 
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(connectionString);
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddOpenApi();
 
 var app = builder.Build();

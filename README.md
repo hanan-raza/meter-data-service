@@ -122,6 +122,30 @@ timestamp;value;status
 
 The spike check uses the median of the neighbours, so one outlier can't hide another next to it. It is skipped when the median is zero (PV at night), because a ratio to zero means nothing.
 
+### Background import
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant E as ImportController
+    participant Q as ImportChannel (bounded)
+    participant B as ImportBackgroundService
+    participant T as ImportJobTracker
+    C->>E: POST /api/import (file, marketLocationId)
+    E->>T: MarkQueued
+    E->>Q: TryEnqueue
+    E-->>C: 202 Accepted + Location
+    B->>Q: ReadAllAsync
+    B->>T: Processing → Completed (summary) / Failed
+    C->>E: GET /api/import/{id}
+    E-->>C: state + counts
+```
+
+- The upload endpoint only checks the request (file present and non-empty, valid MaLo-ID with check digit, max 10 MB), reads the file, and queues an `ImportJob`. It never parses on the request thread.
+- `ImportChannel` wraps a **bounded** `Channel<ImportJob>` (capacity 100). When it is full, the endpoint answers `503` with `Retry-After: 30` instead of buffering file contents without limit.
+- `ImportBackgroundService` reads jobs one at a time, so two files for the same market location can never race once results are persisted. It runs `CsvImportParser` → `ValidationEngine`, and stores counts in `ImportJobTracker`. A job that throws is marked `Failed` and the loop goes on. Rejected rows don't fail a job; they show up in the counts.
+- Job statuses live in memory for now; persisting import results comes with gap filling.
+
 ---
 
 ## Quick Start
@@ -135,13 +159,20 @@ dotnet run --project src/MeterDataService.Api
 
 The development connection string (`ConnectionStrings:MeterData` in `appsettings.Development.json`) matches the credentials in `docker-compose.yml`.
 
-Example request:
+Import a CSV file (a household day with one spike at 18:30 and a missing 03:00 value):
 
 ```bash
-curl http://localhost:5000/api/market-locations/{malo}/consumption?from=2024-01-01&to=2024-01-31&granularity=daily
+curl -i -F "file=@docs/samples/household-one-day.csv" -F "marketLocationId=41373559241" \
+  http://localhost:5227/api/import
+# HTTP/1.1 202 Accepted
+# Location: http://localhost:5227/api/import/0199b9a1-...
+
+curl http://localhost:5227/api/import/0199b9a1-...
+# {"jobId":"0199b9a1-...","marketLocationId":"41373559241","fileName":"household-one-day.csv","state":"Completed",
+#  ...,"summary":{"rowsRead":95,"parseErrors":0,"accepted":94,"rejected":1,"missingIntervals":1,"findings":1}}
 ```
 
-See `docs/requests.http` for a full set of example requests.
+`src/MeterDataService.Api/MeterDataService.Api.http` has the same requests for VS / Rider / VS Code.
 
 ---
 
@@ -171,7 +202,7 @@ See `docs/requests.http` for a full set of example requests.
 
 ```bash
 dotnet test                                  # unit + integration tests
-dotnet test --filter Category=Integration    # only the PostgreSQL integration tests
+dotnet test --filter Category=Integration    # only the integration tests (PostgreSQL + HTTP)
 ```
 
 Integration tests use [Testcontainers](https://dotnet.testcontainers.org/). They need a running Docker engine and no other setup: no `docker compose up`, no connection string. Each test class gets its own `postgres:17` container, and the real EF Core migrations are applied to it (`IntegrationTestBase` + `PostgreSqlFixture`). If Docker isn't available, the integration tests are **skipped** locally. With the `CI` environment variable set (GitHub Actions sets it), they **fail**, so a broken pipeline can't pass silently.
@@ -184,6 +215,8 @@ Coverage highlights:
 - Synthetic profiles: H0 annual energy matches the requested consumption, PV is zero at night and stays centred on solar noon across the clock change, gap and spike rates match the configured probabilities
 - CSV import: offset and local timestamps, the repeated hour on the fall-back day (100 rows → 100 distinct UTC intervals), skipped spring local times, per-line errors, semicolon + decimal comma
 - Validation: all rule types (negative, spike, duplicate, outside period, missing intervals, DST interval count). A known spike in a CSV is rejected, a gap gives the exact missing-interval count, a 96-row fall-back day is flagged. Every spike injected by the synthetic generator is rejected, with no false positives on clean household, commercial and PV series (incl. sunrise ramps).
+- Background import: `ImportBackgroundService` against a fake (unbounded, completed) channel: a job is parsed, validated and completed with exact counts; an empty file completes with a parse error instead of failing; a throwing job doesn't stop the jobs behind it; host shutdown stops the loop cleanly. The bounded channel refuses jobs when full.
+- Import endpoint (in-memory `WebApplicationFactory`, no Docker needed): `202` with `Location` and the job completes in the background; the README sample file yields the documented counts; `400` for an invalid MaLo-ID, an empty file or no file; `404` for an unknown job; `503` + `Retry-After` when the queue is full
 - Rounding: `decimal` arithmetic, no floating-point for energy quantities
 - Gap filling: identical results regardless of input ordering
 - Anomaly detection: known spike sequences always flagged
