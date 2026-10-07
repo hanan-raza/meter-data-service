@@ -80,6 +80,9 @@ erDiagram
         timestamptz interval_start
         numeric value
         string status
+        string replaced_by
+        numeric anchor_value_before
+        numeric anchor_value_after
     }
 ```
 
@@ -146,6 +149,22 @@ sequenceDiagram
 - `ImportBackgroundService` reads jobs one at a time, so two files for the same market location can never race once results are persisted. It runs `CsvImportParser` → `ValidationEngine`, and stores counts in `ImportJobTracker`. A job that throws is marked `Failed` and the loop goes on. Rejected rows don't fail a job; they show up in the counts.
 - Job statuses live in memory for now; persisting import results comes with gap filling.
 
+### Gap filling (Ersatzwertbildung)
+
+`GapDetector` scans a `MeasurementSeries` over a period (UTC instants or whole German calendar days) and returns each run of consecutive unusable intervals as a `Gap`. An interval is unusable if it has no value, or if its value is in the set of intervals that validation rejected. Each gap carries its **anchors**: the usable value just before and just after it. These anchors may lie outside the period (e.g. the last value of yesterday's import). Gaps are measured in UTC, so a gap across the repeated hour on the fall-back day has its real length.
+
+`LinearInterpolationFiller` fills gaps of **at most 4 intervals (one hour)** that have an anchor on both sides:
+
+```
+value(k) = before + (after − before) · k / (n + 1)     k = 1…n, n = gap length
+```
+
+- Results are rounded to 5 decimals (the persisted scale), with midpoints rounded away from zero (kaufmännisches Runden).
+- A rejected value is overwritten in place. A missing value is added. Both get status `Replaced`.
+- Every filled value stores `replaced_by = LinearInterpolation` and both anchor values. A substituted value can therefore be recomputed by hand from the database row alone.
+- Longer gaps and gaps at the edge of the data (only one anchor) are returned as `Unfilled`, for the similar-day method. Extrapolating from a single anchor would invent a trend.
+- Values a sender delivers as already `Replaced` keep an empty trace, because this service can't know how they were derived.
+
 ---
 
 ## Quick Start
@@ -189,6 +208,9 @@ curl http://localhost:5227/api/import/0199b9a1-...
 | Einspeisung / Ausspeisung | Generation / consumption | Energy direction of a market location |
 | Lastgang | Load profile | Time-series of interval (15-min) consumption values |
 | Ersatzwertbildung | Gap filling | Substituting missing or invalid readings with estimated values |
+| Ersatzwert | Substitute value | A value produced by gap filling; stored with status `Replaced` and its derivation |
+| Messlücke | Gap | Consecutive intervals without a usable value (missing or rejected) |
+| Lineare Interpolation | Linear interpolation | Straight line between the values before and after a short gap |
 | Messstellenbetreiber (MSB) | Metering point operator | Responsible for meter hardware and data delivery |
 | Standardlastprofil (SLP) | Standard load profile | Synthetic daily shape (H0 = household, G0 = general commerce) |
 | Dynamisierung | Dynamization | Seasonal scaling of the H0 profile by day of year (more load in winter) |
@@ -218,7 +240,8 @@ Coverage highlights:
 - Background import: `ImportBackgroundService` against a fake (unbounded, completed) channel: a job is parsed, validated and completed with exact counts; an empty file completes with a parse error instead of failing; a throwing job doesn't stop the jobs behind it; host shutdown stops the loop cleanly. The bounded channel refuses jobs when full.
 - Import endpoint (in-memory `WebApplicationFactory`, no Docker needed): `202` with `Location` and the job completes in the background; the README sample file yields the documented counts; `400` for an invalid MaLo-ID, an empty file or no file; `404` for an unknown job; `503` + `Retry-After` when the queue is full
 - Rounding: `decimal` arithmetic, no floating-point for energy quantities
-- Gap filling: identical results regardless of input ordering
+- Gap detection: missing and rejected intervals merge into one gap; edge gaps have no anchor on the open side; anchors just outside the period are used unless they were rejected; a complete 92-interval spring-forward day has no gaps; a gap over both passes of the repeated fall-back hour is 8 intervals long
+- Linear interpolation: gaps of exactly 1, 2, 3 and 4 intervals are filled with the exact expected values; every filled value stores the algorithm and both anchors; a 5-interval gap and a gap without a closing anchor are left unfilled; a rejected spike is overwritten in place; midpoint rounding to 5 decimals; a gap across the fall-back hour is interpolated in real time
 - Anomaly detection: known spike sequences always flagged
 
 ---
