@@ -21,6 +21,13 @@ internal sealed class MeasurementValueConfiguration : IEntityTypeConfiguration<M
             .HasConversion<string>()
             .HasMaxLength(16);
 
+        builder.Property(v => v.ReplacedBy)
+            .HasConversion<string>()
+            .HasMaxLength(32);
+
+        builder.Property(v => v.AnchorValueBefore).HasPrecision(MeasurementValue.Precision, MeasurementValue.Scale);
+        builder.Property(v => v.AnchorValueAfter).HasPrecision(MeasurementValue.Precision, MeasurementValue.Scale);
+
         // One value per interval; also the access path for every range query and aggregation.
         builder.HasIndex(v => new { v.MeasurementSeriesId, v.IntervalStart }).IsUnique();
     }

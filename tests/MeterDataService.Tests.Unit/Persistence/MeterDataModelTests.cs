@@ -24,10 +24,19 @@ public sealed class MeterDataModelTests : IDisposable
 
     public void Dispose() => _context.Dispose();
 
-    [Fact]
-    public void Energy_value_is_numeric_18_5()
+    [Theory]
+    [InlineData(nameof(MeasurementValue.Value))]
+    [InlineData(nameof(MeasurementValue.AnchorValueBefore))]
+    [InlineData(nameof(MeasurementValue.AnchorValueAfter))]
+    public void Energy_values_are_numeric_18_5(string property)
     {
-        Column<MeasurementValue>(nameof(MeasurementValue.Value)).ShouldBe("numeric(18,5)");
+        Column<MeasurementValue>(property).ShouldBe("numeric(18,5)");
+    }
+
+    [Fact]
+    public void Replacement_method_is_stored_as_readable_text()
+    {
+        Column<MeasurementValue>(nameof(MeasurementValue.ReplacedBy)).ShouldBe("character varying(32)");
     }
 
     [Theory]

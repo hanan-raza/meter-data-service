@@ -27,10 +27,7 @@ public sealed class MeasurementValue
                 nameof(intervalStart));
         }
 
-        if (decimal.Round(value, Scale) != value)
-        {
-            throw new ArgumentException($"Energy value {value} has more than {Scale} decimal places.", nameof(value));
-        }
+        EnsureScale(value, nameof(value));
 
         if (!Enum.IsDefined(status))
         {
@@ -57,6 +54,42 @@ public sealed class MeasurementValue
     public decimal Value { get; private set; }
 
     public MeasurementStatus Status { get; private set; }
+
+    /// <summary>
+    /// Algorithm that substituted this value (Ersatzwertverfahren). Null for metered values and for
+    /// substitutes the sender delivered already replaced, whose derivation this service can't know.
+    /// </summary>
+    public ReplacementMethod? ReplacedBy { get; private set; }
+
+    /// <summary>Last usable value before the gap that the substitute was derived from, in kWh.</summary>
+    public decimal? AnchorValueBefore { get; private set; }
+
+    /// <summary>First usable value after the gap that the substitute was derived from, in kWh.</summary>
+    public decimal? AnchorValueAfter { get; private set; }
+
+    /// <summary>
+    /// Overwrites the value with a substitute (Ersatzwert). The previous value is not kept here; the
+    /// validation report of the import that rejected it records what was delivered and why it was unusable.
+    /// </summary>
+    internal void Replace(decimal value, ReplacementTrace trace)
+    {
+        ArgumentNullException.ThrowIfNull(trace);
+        EnsureScale(value, nameof(value));
+
+        Value = value;
+        Status = MeasurementStatus.Replaced;
+        ReplacedBy = trace.Method;
+        AnchorValueBefore = trace.AnchorValueBefore;
+        AnchorValueAfter = trace.AnchorValueAfter;
+    }
+
+    private static void EnsureScale(decimal value, string paramName)
+    {
+        if (decimal.Round(value, Scale) != value)
+        {
+            throw new ArgumentException($"Energy value {value} has more than {Scale} decimal places.", paramName);
+        }
+    }
 
     // German offsets are whole hours, so UTC alignment implies local alignment.
     private static bool IsAlignedToInterval(DateTimeOffset utc) =>

@@ -88,6 +88,53 @@ public class MeasurementValueTests
         series.Values.Count.ShouldBe(92);
     }
 
+    [Fact]
+    public void Substitute_for_missing_interval_adds_replaced_value_with_trace()
+    {
+        var series = NewSeries();
+        var start = new DateTimeOffset(2026, 7, 1, 12, 15, 0, TimeSpan.FromHours(2));
+
+        var value = series.Substitute(start, 0.25m, ReplacementTrace.LinearInterpolation(0.2m, 0.3m));
+
+        series.Values.ShouldHaveSingleItem().ShouldBeSameAs(value);
+        value.IntervalStart.ShouldBe(start);
+        value.Value.ShouldBe(0.25m);
+        value.Status.ShouldBe(MeasurementStatus.Replaced);
+        value.ReplacedBy.ShouldBe(ReplacementMethod.LinearInterpolation);
+        value.AnchorValueBefore.ShouldBe(0.2m);
+        value.AnchorValueAfter.ShouldBe(0.3m);
+    }
+
+    [Fact]
+    public void Substitute_for_existing_interval_overwrites_it_instead_of_adding_a_duplicate()
+    {
+        var series = NewSeries();
+        var start = new DateTimeOffset(2026, 7, 1, 10, 0, 0, TimeSpan.Zero);
+        var spike = series.AddValue(start, 99m, MeasurementStatus.Measured);
+
+        var value = series.Substitute(start, 0.5m, ReplacementTrace.LinearInterpolation(0.4m, 0.6m));
+
+        value.ShouldBeSameAs(spike);
+        series.Values.Count.ShouldBe(1);
+        value.Value.ShouldBe(0.5m);
+        value.Status.ShouldBe(MeasurementStatus.Replaced);
+    }
+
+    [Fact]
+    public void Substitute_with_more_than_five_decimals_is_rejected() =>
+        Should.Throw<ArgumentException>(() =>
+            NewSeries().Substitute(DateTimeOffset.UnixEpoch, 0.123456m, ReplacementTrace.LinearInterpolation(0m, 1m)));
+
+    [Fact]
+    public void Sender_delivered_substitute_has_no_trace()
+    {
+        var value = NewSeries().AddValue(DateTimeOffset.UnixEpoch, 1m, MeasurementStatus.Replaced);
+
+        value.ReplacedBy.ShouldBeNull();
+        value.AnchorValueBefore.ShouldBeNull();
+        value.AnchorValueAfter.ShouldBeNull();
+    }
+
     private static MeasurementSeries NewSeries() =>
         new MarketLocation("41373559241", EnergyDirection.Consumption)
             .AddMeterLocation("DE0001234567890000000000000000001")

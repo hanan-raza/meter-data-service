@@ -47,4 +47,19 @@ public sealed class MeasurementSeries
         _values.Add(measurement);
         return measurement;
     }
+
+    /// <summary>
+    /// Stores a substitute value (Ersatzwert) for an interval: a rejected value already in the series is
+    /// overwritten, a missing one is added. Either way the result is <see cref="MeasurementStatus.Replaced"/>.
+    /// </summary>
+    public MeasurementValue Substitute(DateTimeOffset intervalStart, decimal value, ReplacementTrace trace)
+    {
+        ArgumentNullException.ThrowIfNull(trace);
+
+        var utc = intervalStart.ToUniversalTime();
+        var measurement = _values.Find(v => v.IntervalStart == utc)
+            ?? AddValue(utc, value, MeasurementStatus.Replaced);
+        measurement.Replace(value, trace);
+        return measurement;
+    }
 }
