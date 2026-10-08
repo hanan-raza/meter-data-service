@@ -3,8 +3,9 @@ using MeterDataService.Domain;
 namespace MeterDataService.Application.GapFilling;
 
 /// <summary>
-/// Finds gaps (Messlücken) in a measurement series over a period: intervals with no value, and intervals
-/// whose value was rejected by plausibility checks. Both need a substitute value (Ersatzwert) before billing.
+/// Finds gaps (Messlücken) in a measurement series over a period: intervals with no value, intervals
+/// whose value was rejected by plausibility checks, and estimated values. All need a substitute value
+/// (Ersatzwert) before billing.
 /// </summary>
 public static class GapDetector
 {
@@ -45,7 +46,9 @@ public static class GapDetector
         var usable = new Dictionary<DateTimeOffset, decimal>();
         foreach (var value in series.Values)
         {
-            if (!rejected.Contains(value.IntervalStart))
+            // An estimate (e.g. a zero fallback) is a placeholder: it mustn't anchor an interpolation, and
+            // listing it as a gap lets a later run replace it once a better reference exists.
+            if (value.Status != MeasurementStatus.Estimated && !rejected.Contains(value.IntervalStart))
             {
                 // A series shouldn't hold two values for one interval (unique index); if it does, the first wins.
                 usable.TryAdd(value.IntervalStart, value.Value);

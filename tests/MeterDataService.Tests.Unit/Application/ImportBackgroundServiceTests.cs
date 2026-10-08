@@ -78,9 +78,11 @@ public class ImportBackgroundServiceTests
 
         await service.StopAsync(CancellationToken.None);
 
+        // Since .NET 10 ExecuteAsync is started via Task.Run with the stopping token: a stop that wins the race
+        // against its start leaves the task Canceled. Both outcomes are a clean shutdown; only a fault is not.
         var execution = service.ExecuteTask.ShouldNotBeNull();
-        await execution.WaitAsync(Timeout);
-        execution.IsCompletedSuccessfully.ShouldBeTrue();
+        await execution.ContinueWith(_ => { }, TaskScheduler.Default).WaitAsync(Timeout);
+        execution.IsFaulted.ShouldBeFalse();
     }
 
     private ImportJob Enqueue(string content)

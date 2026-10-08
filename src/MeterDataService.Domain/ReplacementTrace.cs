@@ -6,14 +6,24 @@ namespace MeterDataService.Domain;
 /// </summary>
 public sealed record ReplacementTrace
 {
-    private ReplacementTrace(ReplacementMethod method, decimal? anchorValueBefore, decimal? anchorValueAfter)
+    private ReplacementTrace(
+        ReplacementMethod method,
+        MeasurementStatus resultingStatus,
+        decimal? anchorValueBefore = null,
+        decimal? anchorValueAfter = null,
+        DateOnly? sourceDay = null)
     {
         Method = method;
+        ResultingStatus = resultingStatus;
         AnchorValueBefore = anchorValueBefore;
         AnchorValueAfter = anchorValueAfter;
+        SourceDay = sourceDay;
     }
 
     public ReplacementMethod Method { get; }
+
+    /// <summary>Status the substituted value gets: a derived value is replaced, a placeholder only estimated.</summary>
+    public MeasurementStatus ResultingStatus { get; }
 
     /// <summary>Energy in kWh of the last usable interval before the gap.</summary>
     public decimal? AnchorValueBefore { get; }
@@ -21,6 +31,15 @@ public sealed record ReplacementTrace
     /// <summary>Energy in kWh of the first usable interval after the gap.</summary>
     public decimal? AnchorValueAfter { get; }
 
+    /// <summary>German calendar day the value was copied from (Vergleichstag).</summary>
+    public DateOnly? SourceDay { get; }
+
     public static ReplacementTrace LinearInterpolation(decimal anchorValueBefore, decimal anchorValueAfter) =>
-        new(ReplacementMethod.LinearInterpolation, anchorValueBefore, anchorValueAfter);
+        new(ReplacementMethod.LinearInterpolation, MeasurementStatus.Replaced, anchorValueBefore, anchorValueAfter);
+
+    public static ReplacementTrace SimilarDay(DateOnly sourceDay) =>
+        new(ReplacementMethod.SimilarDay, MeasurementStatus.Replaced, sourceDay: sourceDay);
+
+    public static ReplacementTrace ZeroFallback() =>
+        new(ReplacementMethod.ZeroFallback, MeasurementStatus.Estimated);
 }

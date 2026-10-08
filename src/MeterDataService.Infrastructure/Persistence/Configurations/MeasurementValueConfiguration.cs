@@ -28,6 +28,9 @@ internal sealed class MeasurementValueConfiguration : IEntityTypeConfiguration<M
         builder.Property(v => v.AnchorValueBefore).HasPrecision(MeasurementValue.Precision, MeasurementValue.Scale);
         builder.Property(v => v.AnchorValueAfter).HasPrecision(MeasurementValue.Precision, MeasurementValue.Scale);
 
+        // A local calendar day, not an instant: timestamptz would shift it across midnight.
+        builder.Property(v => v.SourceDay).HasColumnType("date");
+
         // One value per interval; also the access path for every range query and aggregation.
         builder.HasIndex(v => new { v.MeasurementSeriesId, v.IntervalStart }).IsUnique();
     }

@@ -3,6 +3,7 @@ using System;
 using MeterDataService.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace MeterDataService.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(MeterDataDbContext))]
-    partial class MeterDataDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261008175732_AddReplacementSourceDay")]
+    partial class AddReplacementSourceDay
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

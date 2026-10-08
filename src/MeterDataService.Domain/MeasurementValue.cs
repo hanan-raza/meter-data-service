@@ -67,6 +67,9 @@ public sealed class MeasurementValue
     /// <summary>First usable value after the gap that the substitute was derived from, in kWh.</summary>
     public decimal? AnchorValueAfter { get; private set; }
 
+    /// <summary>German calendar day the substitute was copied from (Vergleichstag), for similar-day substitutes.</summary>
+    public DateOnly? SourceDay { get; private set; }
+
     /// <summary>
     /// Overwrites the value with a substitute (Ersatzwert). The previous value is not kept here; the
     /// validation report of the import that rejected it records what was delivered and why it was unusable.
@@ -77,10 +80,11 @@ public sealed class MeasurementValue
         EnsureScale(value, nameof(value));
 
         Value = value;
-        Status = MeasurementStatus.Replaced;
+        Status = trace.ResultingStatus;
         ReplacedBy = trace.Method;
         AnchorValueBefore = trace.AnchorValueBefore;
         AnchorValueAfter = trace.AnchorValueAfter;
+        SourceDay = trace.SourceDay;
     }
 
     private static void EnsureScale(decimal value, string paramName)

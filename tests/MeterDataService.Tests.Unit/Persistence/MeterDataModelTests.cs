@@ -39,6 +39,12 @@ public sealed class MeterDataModelTests : IDisposable
         Column<MeasurementValue>(nameof(MeasurementValue.ReplacedBy)).ShouldBe("character varying(32)");
     }
 
+    [Fact]
+    public void Similar_day_source_is_a_calendar_date_not_an_instant()
+    {
+        Column<MeasurementValue>(nameof(MeasurementValue.SourceDay)).ShouldBe("date");
+    }
+
     [Theory]
     [InlineData(typeof(MeasurementValue), nameof(MeasurementValue.IntervalStart))]
     [InlineData(typeof(Meter), nameof(Meter.InstalledAt))]

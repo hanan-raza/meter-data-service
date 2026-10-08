@@ -126,6 +126,42 @@ public class MeasurementValueTests
             NewSeries().Substitute(DateTimeOffset.UnixEpoch, 0.123456m, ReplacementTrace.LinearInterpolation(0m, 1m)));
 
     [Fact]
+    public void Similar_day_substitute_stores_its_source_day()
+    {
+        var sourceDay = new DateOnly(2026, 6, 24);
+
+        var value = NewSeries().Substitute(DateTimeOffset.UnixEpoch, 0.4m, ReplacementTrace.SimilarDay(sourceDay));
+
+        value.Status.ShouldBe(MeasurementStatus.Replaced);
+        value.ReplacedBy.ShouldBe(ReplacementMethod.SimilarDay);
+        value.SourceDay.ShouldBe(sourceDay);
+        value.AnchorValueBefore.ShouldBeNull();
+    }
+
+    [Fact]
+    public void Zero_fallback_is_estimated_not_replaced()
+    {
+        var value = NewSeries().Substitute(DateTimeOffset.UnixEpoch, 0m, ReplacementTrace.ZeroFallback());
+
+        value.Status.ShouldBe(MeasurementStatus.Estimated);
+        value.ReplacedBy.ShouldBe(ReplacementMethod.ZeroFallback);
+        value.SourceDay.ShouldBeNull();
+    }
+
+    [Fact]
+    public void New_substitute_overwrites_the_trace_of_an_earlier_one()
+    {
+        var series = NewSeries();
+        series.Substitute(DateTimeOffset.UnixEpoch, 0.5m, ReplacementTrace.LinearInterpolation(0.4m, 0.6m));
+
+        var value = series.Substitute(DateTimeOffset.UnixEpoch, 0.7m, ReplacementTrace.SimilarDay(new DateOnly(2026, 6, 24)));
+
+        value.AnchorValueBefore.ShouldBeNull();
+        value.AnchorValueAfter.ShouldBeNull();
+        value.SourceDay.ShouldBe(new DateOnly(2026, 6, 24));
+    }
+
+    [Fact]
     public void Sender_delivered_substitute_has_no_trace()
     {
         var value = NewSeries().AddValue(DateTimeOffset.UnixEpoch, 1m, MeasurementStatus.Replaced);
@@ -133,6 +169,7 @@ public class MeasurementValueTests
         value.ReplacedBy.ShouldBeNull();
         value.AnchorValueBefore.ShouldBeNull();
         value.AnchorValueAfter.ShouldBeNull();
+        value.SourceDay.ShouldBeNull();
     }
 
     private static MeasurementSeries NewSeries() =>

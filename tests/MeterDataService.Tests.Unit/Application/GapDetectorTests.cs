@@ -43,6 +43,20 @@ public class GapDetectorTests
     }
 
     [Fact]
+    public void Estimated_value_is_a_gap_and_not_an_anchor()
+    {
+        // A zero fallback must not drag an interpolation towards zero, and a later run should be able to replace it.
+        var series = SeriesWith(T0, 8, skip: [3, 4]);
+        series.AddValue(T0 + 4 * Quarter, 0m, MeasurementStatus.Estimated);
+
+        var gap = GapDetector.FindGaps(series, T0, T0 + 8 * Quarter).ShouldHaveSingleItem();
+
+        gap.From.ShouldBe(T0 + 3 * Quarter);
+        gap.IntervalCount.ShouldBe(2);
+        gap.AnchorAfter.ShouldBe(ValueAt(5));
+    }
+
+    [Fact]
     public void Adjacent_missing_and_rejected_intervals_form_one_gap()
     {
         var series = SeriesWith(T0, 10, skip: [3, 4]);

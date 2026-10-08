@@ -57,6 +57,35 @@ public sealed class MeasurementValuePersistenceTests(PostgreSqlFixture database)
         read.Select(v => v.Status).ShouldBe([MeasurementStatus.Measured, MeasurementStatus.Estimated]);
     }
 
+    [SkippableFact]
+    public async Task Similar_day_trace_round_trips_through_postgres()
+    {
+        var sourceDay = new DateOnly(2026, 6, 24);
+        var series = await SaveSeriesAsync(
+            "20000000008",
+            "DE0001234567890000000000000000003",
+            s =>
+            {
+                s.Substitute(new DateTimeOffset(2026, 7, 1, 12, 0, 0, TimeSpan.FromHours(2)), 0.375m, ReplacementTrace.SimilarDay(sourceDay));
+                s.Substitute(new DateTimeOffset(2026, 7, 1, 12, 15, 0, TimeSpan.FromHours(2)), 0m, ReplacementTrace.ZeroFallback());
+            });
+
+        await using var context = CreateDbContext();
+        var read = await context.MeasurementValues
+            .Where(v => v.MeasurementSeriesId == series.Id)
+            .OrderBy(v => v.IntervalStart)
+            .ToListAsync();
+
+        read.Count.ShouldBe(2);
+        read[0].Value.ShouldBe(0.375m);
+        read[0].Status.ShouldBe(MeasurementStatus.Replaced);
+        read[0].ReplacedBy.ShouldBe(ReplacementMethod.SimilarDay);
+        read[0].SourceDay.ShouldBe(sourceDay);
+        read[1].Status.ShouldBe(MeasurementStatus.Estimated);
+        read[1].ReplacedBy.ShouldBe(ReplacementMethod.ZeroFallback);
+        read[1].SourceDay.ShouldBeNull();
+    }
+
     // Each test uses its own MaLo/MeLo because both IDs are unique and the database is shared per class.
     private async Task<MeasurementSeries> SaveSeriesAsync(string maLoId, string meLoId, Action<MeasurementSeries> addValues)
     {
