@@ -1,3 +1,4 @@
+using MeterDataService.Application.Aggregation;
 using MeterDataService.Application.Import;
 using MeterDataService.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -13,6 +14,7 @@ public static class DependencyInjection
 
         services.AddDbContext<MeterDataDbContext>(options => options.UseMeterDataStore(connectionString));
         services.AddScoped<IMeasurementSeriesRepository, MeasurementSeriesRepository>();
+        services.AddScoped<IAggregationRepository, AggregationRepository>();
         return services;
     }
 

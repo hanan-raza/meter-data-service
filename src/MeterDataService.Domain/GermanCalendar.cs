@@ -8,7 +8,10 @@ public static class GermanCalendar
 {
     public const int QuarterHoursPerNormalDay = 96;
 
-    public static TimeZoneInfo TimeZone { get; } = TimeZoneInfo.FindSystemTimeZoneById("Europe/Berlin");
+    /// <summary>IANA zone ID; also understood by PostgreSQL, so SQL can bucket by German days.</summary>
+    public const string TimeZoneId = "Europe/Berlin";
+
+    public static TimeZoneInfo TimeZone { get; } = TimeZoneInfo.FindSystemTimeZoneById(TimeZoneId);
 
     /// <summary>UTC instant of local midnight at the start of the given day.</summary>
     public static DateTimeOffset StartOfDayUtc(DateOnly day)

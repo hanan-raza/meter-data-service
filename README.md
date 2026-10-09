@@ -184,6 +184,17 @@ value(k) = before + (after − before) · k / (n + 1)     k = 1…n, n = gap len
 - Every filled value stores `replaced_by = SimilarDay` and `source_day`, the German calendar day it was copied from.
 - **Fallback:** without a candidate, the values are set to `0` with status `Estimated` and `replaced_by = ZeroFallback`. Because `Estimated` counts as a gap, the next run replaces these placeholders as soon as a similar day exists, and they never anchor an interpolation. An estimate the sender delivered itself is kept rather than overwritten with zero.
 
+### Aggregation
+
+`IAggregationRepository` returns hourly, daily and monthly totals of a market location's energy series over a period of German calendar days. Each `EnergyTotal` has the bucket `Start` / `End` (with the German offset of that instant), `EnergyKwh`, the number of `Intervals` summed and how many of them are `MeasuredIntervals`.
+
+- The sums run in PostgreSQL (`sum` over `numeric`), so they are exact `decimal`s with no floating point on the way.
+- Days and months are cut at local midnight with `date_trunc(…, 'Europe/Berlin')`. The fall-back day is one 25-hour bucket with 100 intervals, the spring-forward day a 23-hour bucket with 92. Local midnight on 1 October (22:00 UTC on 30 September) counts for October.
+- Hours are cut in UTC, which is the same as local hours because German offsets are whole hours. This keeps the two passes of the repeated 02:00 hour apart: the fall-back day has 25 hourly totals, `02:00+02:00` and `02:00+01:00`.
+- Buckets without values are omitted, so "no data" is not shown as zero consumption.
+
+See [ADR 0002](docs/adr/0002-aggregation-in-sql-with-german-time-buckets.md). The REST endpoints follow on Day 9.
+
 ---
 
 ## Quick Start
@@ -270,6 +281,7 @@ Coverage highlights:
 - Linear interpolation: gaps of exactly 1, 2, 3 and 4 intervals are filled with the exact expected values; every filled value stores the algorithm and both anchors; a 5-interval gap and a gap without a closing anchor are left unfilled; a rejected spike is overwritten in place; midpoint rounding to 5 decimals; a gap across the fall-back hour is interpolated in real time
 - Similar-day filling: a Wednesday gap is copied from last Wednesday (preferred over the more recent Tuesday), then from two weeks back, then from another workday; Saturday uses Saturday; weekend days, days beyond 14 days, rejected or substituted source values disqualify a candidate; no candidate → `0` + `Estimated`, but a sender's estimate is kept; a zero fallback is replaced on the next run; a gap across midnight gets one source per day; DST: both passes of the repeated hour are filled from a normal Sunday, the CET pass is picked when the fall-back day is the source, the spring-forward day is skipped for its missing hour
 - Gap-filling orchestration: short gaps are interpolated even when a similar day exists, long and edge gaps go to the similar-day method, a complete day writes nothing; the similar-day trace (`source_day`) round-trips through PostgreSQL
+- Aggregation (PostgreSQL): daily totals over the 25-hour fall-back day (100 intervals, `+02:00` → `+01:00`) and the 23-hour spring-forward day (92 intervals); 25 hourly totals on the fall-back day with both 02:00 passes apart; local midnight on the 1st counts for the new month; `0.33333 × 3 + 0.00001` sums to exactly `1`; other market locations, the other direction's series and values outside the period are excluded; substituted values are counted apart from measured ones; an unknown MaLo has no totals
 - Anomaly detection: known spike sequences always flagged
 
 ---
@@ -279,6 +291,7 @@ Coverage highlights:
 See `docs/adr/` for Architecture Decision Records.
 
 - [ADR 0001 — Persistence model for interval meter data](docs/adr/0001-persistence-model-for-interval-data.md): `decimal(18,5)`, UTC `timestamptz`, UUIDv7 keys, 1:n MaLo–MeLo simplification
+- [ADR 0002 — Aggregation in SQL with German-time buckets](docs/adr/0002-aggregation-in-sql-with-german-time-buckets.md): exact `numeric` sums in PostgreSQL, days/months cut in `Europe/Berlin`, hours in UTC so the repeated hour stays two buckets
 
 ---
 
@@ -293,4 +306,4 @@ See `docs/adr/` for Architecture Decision Records.
 
 ## Kurzfassung auf Deutsch
 
-Dieser Dienst implementiert die Kernfunktionen eines Messdatenmanagement-Systems (MDM) für den deutschen Energiemarkt. Rohdaten aus 15-Minuten-Intervallzählungen werden über eine CSV-Importpipeline eingelesen, gegen Plausibilitätsregeln geprüft und mit Statusinformationen (gemessen, geschätzt, ersetzt) versehen. Fehlende Werte werden durch Ersatzwertbildung aufgefüllt — kurze Lücken durch lineare Interpolation, längere durch das Vergleichstagverfahren (gleicher Tagestyp der letzten 14 Tage). Jede Ersetzung ist vollständig rückverfolgbar: Verfahren, Stützwerte bzw. Vergleichstag werden je Wert gespeichert. Eine ML.NET-basierte Anomalieerkennung überwacht die Lastgänge kontinuierlich im Hintergrund und berechnet einen datenqualitätsbezogenen Score je Messreihe. Die REST-API liefert aggregierte Verbrauchswerte (stündlich, täglich, monatlich) pro Marktlokation. Zeitzonenkorrektheit für die Mitteleuropäische Zeitzone (MEZ/MESZ) — insbesondere die 23- und 25-Stunden-Tage — wird durch dedizierte Tests abgesichert.
+Dieser Dienst implementiert die Kernfunktionen eines Messdatenmanagement-Systems (MDM) für den deutschen Energiemarkt. Rohdaten aus 15-Minuten-Intervallzählungen werden über eine CSV-Importpipeline eingelesen, gegen Plausibilitätsregeln geprüft und mit Statusinformationen (gemessen, geschätzt, ersetzt) versehen. Fehlende Werte werden durch Ersatzwertbildung aufgefüllt — kurze Lücken durch lineare Interpolation, längere durch das Vergleichstagverfahren (gleicher Tagestyp der letzten 14 Tage). Jede Ersetzung ist vollständig rückverfolgbar: Verfahren, Stützwerte bzw. Vergleichstag werden je Wert gespeichert. Eine ML.NET-basierte Anomalieerkennung überwacht die Lastgänge kontinuierlich im Hintergrund und berechnet einen datenqualitätsbezogenen Score je Messreihe. Jeder Import wird samt Ersatzwerten in einer Transaktion gespeichert; eine spätere Lieferung ersetzt frühere Werte. Aggregierte Verbrauchswerte (stündlich, täglich, monatlich) pro Marktlokation werden exakt als `numeric`-Summen in PostgreSQL berechnet, mit Tages- und Monatsgrenzen in deutscher Zeit. Zeitzonenkorrektheit für die Mitteleuropäische Zeitzone (MEZ/MESZ) — insbesondere die 23- und 25-Stunden-Tage — wird durch dedizierte Tests abgesichert.
