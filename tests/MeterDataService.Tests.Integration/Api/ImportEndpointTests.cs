@@ -5,8 +5,13 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using MeterDataService.Application.Import;
+using MeterDataService.Domain;
+using MeterDataService.Infrastructure.Persistence;
+using MeterDataService.Tests.Integration.Infrastructure;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
@@ -15,19 +20,31 @@ using Shouldly;
 namespace MeterDataService.Tests.Integration.Api;
 
 /// <summary>
-/// Runs the real API in memory. No database is touched yet, so these tests don't need Docker.
+/// Runs the real API in memory against a PostgreSQL container. The factory runs in the Development environment,
+/// so the sample market location from <c>appsettings.Development.json</c> is seeded on start-up.
 /// </summary>
 [Trait("Category", "Integration")]
-public sealed class ImportEndpointTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
+public sealed class ImportEndpointTests : IntegrationTestBase, IDisposable
 {
-    private const string ValidMaLo = "41373559241";
+    private const string ValidMaLo = SampleMasterData.MaLoId;
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
 
-    [Fact]
+    private readonly WebApplicationFactory<Program> _factory;
+
+    public ImportEndpointTests(PostgreSqlFixture database)
+        : base(database)
+    {
+        _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            builder.UseSetting("ConnectionStrings:MeterData", database.ConnectionString));
+    }
+
+    public void Dispose() => _factory.Dispose();
+
+    [SkippableFact]
     public async Task Upload_returns_202_with_location_and_the_job_is_processed_in_the_background()
     {
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), Form(OneDayCsv(), ValidMaLo));
 
@@ -40,13 +57,14 @@ public sealed class ImportEndpointTests(WebApplicationFactory<Program> factory) 
 
         var finished = await PollUntilFinished(client, response.Headers.Location);
         finished.State.ShouldBe(ImportJobState.Completed);
-        finished.Summary.ShouldBe(new ImportSummary(RowsRead: 96, ParseErrors: 0, Accepted: 96, Rejected: 0, MissingIntervals: 0, Findings: 0));
+        finished.Summary.ShouldBe(new ImportSummary(
+            RowsRead: 96, ParseErrors: 0, Accepted: 96, Rejected: 0, MissingIntervals: 0, Findings: 0, Substituted: 0));
     }
 
-    [Fact]
-    public async Task Documented_sample_file_yields_the_documented_summary()
+    [SkippableFact]
+    public async Task Documented_sample_file_is_persisted_with_its_gaps_filled()
     {
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
         var csv = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Samples", "household-one-day.csv"));
 
         using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), Form(csv, ValidMaLo));
@@ -55,16 +73,43 @@ public sealed class ImportEndpointTests(WebApplicationFactory<Program> factory) 
         var finished = await PollUntilFinished(client, response.Headers.Location.ShouldNotBeNull());
         finished.State.ShouldBe(ImportJobState.Completed);
 
-        // The README shows this result: the 18:30 spike is rejected and 03:00 is missing.
-        finished.Summary.ShouldBe(new ImportSummary(RowsRead: 95, ParseErrors: 0, Accepted: 94, Rejected: 1, MissingIntervals: 1, Findings: 1));
+        // The README shows this result: the 18:30 spike is rejected and 03:00 is missing; both are interpolated.
+        finished.Summary.ShouldBe(new ImportSummary(
+            RowsRead: 95, ParseErrors: 0, Accepted: 94, Rejected: 1, MissingIntervals: 1, Findings: 1, Substituted: 2));
+
+        var day = new DateOnly(2026, 6, 10);
+        await using var context = CreateDbContext();
+        var stored = await context.MeasurementValues
+            .Where(v => v.IntervalStart >= GermanCalendar.StartOfDayUtc(day) && v.IntervalStart < GermanCalendar.StartOfDayUtc(day.AddDays(1)))
+            .ToListAsync();
+        stored.Count.ShouldBe(96);
+        stored.Where(v => v.Status == MeasurementStatus.Replaced)
+            .Select(v => TimeZoneInfo.ConvertTime(v.IntervalStart, GermanCalendar.TimeZone).TimeOfDay)
+            .ShouldBe([new TimeSpan(3, 0, 0), new TimeSpan(18, 30, 0)], ignoreOrder: true);
+        stored.Where(v => v.Status == MeasurementStatus.Replaced).ShouldAllBe(v => v.ReplacedBy == ReplacementMethod.LinearInterpolation);
     }
 
-    [Theory]
+    [SkippableFact]
+    public async Task Import_for_a_market_location_without_master_data_fails_with_a_reason()
+    {
+        // Valid MaLo-ID, so the endpoint accepts it, but never registered.
+        const string unknownMaLo = "10000000009";
+        using var client = _factory.CreateClient();
+
+        using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), Form(OneDayCsv(), unknownMaLo));
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Accepted);
+        var finished = await PollUntilFinished(client, response.Headers.Location.ShouldNotBeNull());
+        finished.State.ShouldBe(ImportJobState.Failed);
+        finished.Error.ShouldBe(ImportBackgroundService.UnknownMarketLocationMessage(unknownMaLo));
+    }
+
+    [SkippableTheory]
     [InlineData("41373559242")] // wrong check digit
     [InlineData("4137355924")] // too short
     public async Task Invalid_market_location_id_is_rejected_with_400(string maLo)
     {
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), Form(OneDayCsv(), maLo));
 
@@ -72,20 +117,20 @@ public sealed class ImportEndpointTests(WebApplicationFactory<Program> factory) 
         (await response.Content.ReadAsStringAsync()).ShouldContain("marketLocationId");
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Empty_file_is_rejected_with_400()
     {
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), Form(string.Empty, ValidMaLo));
 
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Request_without_file_is_rejected_with_400()
     {
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
         using var form = new MultipartFormDataContent { { new StringContent(ValidMaLo), "marketLocationId" } };
 
         using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), form);
@@ -93,21 +138,21 @@ public sealed class ImportEndpointTests(WebApplicationFactory<Program> factory) 
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Unknown_job_id_returns_404()
     {
-        using var client = factory.CreateClient();
+        using var client = _factory.CreateClient();
 
         using var response = await client.GetAsync(new Uri($"/api/import/{Guid.CreateVersion7()}", UriKind.Relative));
 
         response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Full_queue_returns_503_with_retry_after_and_forgets_the_job()
     {
         // No background service draining the queue, and room for exactly one job.
-        using var stalled = factory.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        using var stalled = _factory.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<IHostedService>();
             services.Replace(ServiceDescriptor.Singleton(new ImportChannel(capacity: 1)));
@@ -149,10 +194,12 @@ public sealed class ImportEndpointTests(WebApplicationFactory<Program> factory) 
         };
     }
 
+    // A different day than the sample file: the database is shared by the class, and a stored value would
+    // otherwise turn the sample's gaps into intervals that need no substitute.
     private static string OneDayCsv()
     {
         var csv = new StringBuilder("timestamp;value;status\n");
-        for (var local = new DateTime(2026, 6, 10, 0, 0, 0); local.Day == 10; local = local.AddMinutes(15))
+        for (var local = new DateTime(2026, 5, 20, 0, 0, 0); local.Day == 20; local = local.AddMinutes(15))
         {
             csv.Append(CultureInfo.InvariantCulture, $"{local:yyyy-MM-dd'T'HH:mm:ss}+02:00;0,25;Measured\n");
         }

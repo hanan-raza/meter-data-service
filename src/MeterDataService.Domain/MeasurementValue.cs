@@ -28,11 +28,7 @@ public sealed class MeasurementValue
         }
 
         EnsureScale(value, nameof(value));
-
-        if (!Enum.IsDefined(status))
-        {
-            throw new ArgumentOutOfRangeException(nameof(status), status, "Unknown measurement status.");
-        }
+        EnsureDefined(status);
 
         MeasurementSeriesId = measurementSeriesId;
         IntervalStart = utc;
@@ -85,6 +81,31 @@ public sealed class MeasurementValue
         AnchorValueBefore = trace.AnchorValueBefore;
         AnchorValueAfter = trace.AnchorValueAfter;
         SourceDay = trace.SourceDay;
+    }
+
+    /// <summary>
+    /// Takes a newly delivered value. The trace of an earlier substitute is dropped: the value now comes from
+    /// the sender, and the sender's own derivation (if it delivered a substitute) is unknown here.
+    /// </summary>
+    internal void Overwrite(decimal value, MeasurementStatus status)
+    {
+        EnsureScale(value, nameof(value));
+        EnsureDefined(status);
+
+        Value = value;
+        Status = status;
+        ReplacedBy = null;
+        AnchorValueBefore = null;
+        AnchorValueAfter = null;
+        SourceDay = null;
+    }
+
+    private static void EnsureDefined(MeasurementStatus status)
+    {
+        if (!Enum.IsDefined(status))
+        {
+            throw new ArgumentOutOfRangeException(nameof(status), status, "Unknown measurement status.");
+        }
     }
 
     private static void EnsureScale(decimal value, string paramName)

@@ -9,6 +9,12 @@ public sealed class MeasurementSeries
 {
     public const int ObisCodeMaxLength = 32;
 
+    /// <summary>Active energy drawn from the grid per interval (Wirkarbeit Bezug).</summary>
+    public const string ConsumedActiveEnergy = "1-1:1.29.0";
+
+    /// <summary>Active energy fed into the grid per interval (Wirkarbeit Lieferung).</summary>
+    public const string FedInActiveEnergy = "1-1:2.29.0";
+
     /// <summary>Market-standard resolution for interval metering (RLM / iMSys).</summary>
     public static readonly TimeSpan IntervalLength = TimeSpan.FromMinutes(15);
 
@@ -40,6 +46,31 @@ public sealed class MeasurementSeries
     public string ObisCode { get; private set; }
 
     public IReadOnlyCollection<MeasurementValue> Values => _values;
+
+    /// <summary>OBIS code of the series that carries a market location's billed energy in the given direction.</summary>
+    public static string EnergyObisCodeFor(EnergyDirection direction) => direction switch
+    {
+        EnergyDirection.Consumption => ConsumedActiveEnergy,
+        EnergyDirection.Generation => FedInActiveEnergy,
+        _ => throw new ArgumentOutOfRangeException(nameof(direction), direction, "Unknown energy direction."),
+    };
+
+    /// <summary>
+    /// Stores a value as delivered by the sender. A value already stored for the interval is overwritten,
+    /// including a substitute: a later delivery (e.g. a correction, Korrekturlieferung) supersedes what was there.
+    /// </summary>
+    public MeasurementValue Record(DateTimeOffset intervalStart, decimal value, MeasurementStatus status)
+    {
+        var utc = intervalStart.ToUniversalTime();
+        var existing = _values.Find(v => v.IntervalStart == utc);
+        if (existing is null)
+        {
+            return AddValue(utc, value, status);
+        }
+
+        existing.Overwrite(value, status);
+        return existing;
+    }
 
     public MeasurementValue AddValue(DateTimeOffset intervalStart, decimal value, MeasurementStatus status)
     {

@@ -17,7 +17,12 @@ public enum ImportJobState
 /// <param name="Rejected">Parsed values rejected by a plausibility rule; candidates for gap filling.</param>
 /// <param name="MissingIntervals">Intervals in the covered days without any value.</param>
 /// <param name="Findings">Period-level warnings, e.g. one per contiguous gap or wrong DST interval count.</param>
-public sealed record ImportSummary(int RowsRead, int ParseErrors, int Accepted, int Rejected, int MissingIntervals, int Findings);
+/// <param name="Substituted">
+/// Values written by gap filling (Ersatzwertbildung) for the covered days, including zero fallbacks. Can exceed
+/// <paramref name="Rejected"/> + <paramref name="MissingIntervals"/> when earlier placeholders are replaced too.
+/// </param>
+public sealed record ImportSummary(
+    int RowsRead, int ParseErrors, int Accepted, int Rejected, int MissingIntervals, int Findings, int Substituted);
 
 /// <summary>Where a job stands; what the client sees when polling.</summary>
 public sealed record ImportJobStatus(

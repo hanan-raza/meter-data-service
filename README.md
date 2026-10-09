@@ -135,11 +135,16 @@ sequenceDiagram
     participant Q as ImportChannel (bounded)
     participant B as ImportBackgroundService
     participant T as ImportJobTracker
+    participant R as IMeasurementSeriesRepository
     C->>E: POST /api/import (file, marketLocationId)
     E->>T: MarkQueued
     E->>Q: TryEnqueue
     E-->>C: 202 Accepted + Location
     B->>Q: ReadAllAsync
+    B->>B: parse → validate
+    B->>R: FindEnergySeriesAsync (period + 14 lookback days)
+    B->>B: record accepted values → GapFillingService
+    B->>R: SaveChangesAsync (one transaction)
     B->>T: Processing → Completed (summary) / Failed
     C->>E: GET /api/import/{id}
     E-->>C: state + counts
@@ -147,8 +152,11 @@ sequenceDiagram
 
 - The upload endpoint only checks the request (file present and non-empty, valid MaLo-ID with check digit, max 10 MB), reads the file, and queues an `ImportJob`. It never parses on the request thread.
 - `ImportChannel` wraps a **bounded** `Channel<ImportJob>` (capacity 100). When it is full, the endpoint answers `503` with `Retry-After: 30` instead of buffering file contents without limit.
-- `ImportBackgroundService` reads jobs one at a time, so two files for the same market location can never race once results are persisted. It runs `CsvImportParser` → `ValidationEngine`, and stores counts in `ImportJobTracker`. A job that throws is marked `Failed` and the loop goes on. Rejected rows don't fail a job; they show up in the counts.
-- Job statuses live in memory for now; persisting import results comes with gap filling.
+- `ImportBackgroundService` reads jobs one at a time, so two files for the same market location can never race on the same intervals. It runs `CsvImportParser` → `ValidationEngine` → `GapFillingService` and persists the result, then stores the counts in `ImportJobTracker`. A job that throws is marked `Failed` and the loop goes on. Rejected rows don't fail a job; they show up in the counts.
+- **Persistence**: per job, a DI scope gives a fresh `DbContext` behind `IMeasurementSeriesRepository` (unit of work). It loads the market location's energy series (OBIS `1-1:1.29.0` for consumption, `1-1:2.29.0` for generation). Only the values of the file's days, the 14 lookback days of the similar-day method, and the first value after the period (the closing interpolation anchor) are loaded. Accepted values are recorded and gaps are filled, all in memory. Then everything is saved in one transaction, so a job is stored completely or not at all.
+- **A later delivery wins**: an accepted value overwrites what is stored for its interval, including an earlier substitute, whose trace is dropped. A **rejected** reading is not stored at all. A good value from an earlier delivery stays, and an interval without one becomes a gap.
+- A market location without master data (Stammdaten) is refused: the job ends `Failed` with the reason. Master data normally arrives via market communication (UTILMD). For the quick start, `SeedSampleMasterData` (on in `appsettings.Development.json`) creates the sample MaLo `41373559241` with one meter location and its consumption series.
+- Job statuses live in memory; the imported values are in the database.
 
 ### Gap filling (Ersatzwertbildung)
 
@@ -189,7 +197,7 @@ dotnet run --project src/MeterDataService.Api
 
 The development connection string (`ConnectionStrings:MeterData` in `appsettings.Development.json`) matches the credentials in `docker-compose.yml`.
 
-Import a CSV file (a household day with one spike at 18:30 and a missing 03:00 value):
+Import a CSV file (a household day with one spike at 18:30 and a missing 03:00 value) into the sample market location, which is seeded on start-up in Development:
 
 ```bash
 curl -i -F "file=@docs/samples/household-one-day.csv" -F "marketLocationId=41373559241" \
@@ -199,8 +207,10 @@ curl -i -F "file=@docs/samples/household-one-day.csv" -F "marketLocationId=41373
 
 curl http://localhost:5227/api/import/0199b9a1-...
 # {"jobId":"0199b9a1-...","marketLocationId":"41373559241","fileName":"household-one-day.csv","state":"Completed",
-#  ...,"summary":{"rowsRead":95,"parseErrors":0,"accepted":94,"rejected":1,"missingIntervals":1,"findings":1}}
+#  ...,"summary":{"rowsRead":95,"parseErrors":0,"accepted":94,"rejected":1,"missingIntervals":1,"findings":1,"substituted":2}}
 ```
+
+The spike and the missing value are both interpolated, so the day is stored with 96 values: 94 `Measured`, 2 `Replaced`.
 
 `src/MeterDataService.Api/MeterDataService.Api.http` has the same requests for VS / Rider / VS Code.
 
@@ -229,6 +239,8 @@ curl http://localhost:5227/api/import/0199b9a1-...
 | Dynamisierung | Dynamization | Seasonal scaling of the H0 profile by day of year (more load in winter) |
 | Bandlast | Base load | Constant load over the whole day |
 | Plausibilisierung | Validation | Checking delivered values against plausibility rules before they are used |
+| Stammdaten | Master data | Market locations, meter locations and their series; must exist before values can be imported |
+| Korrekturlieferung | Corrected delivery | A later delivery of values for intervals already sent; it supersedes the stored values |
 | Zeitumstellung | Clock change | Switch to/from summer time; makes a market day 23 or 25 hours long |
 
 ---
@@ -250,8 +262,9 @@ Coverage highlights:
 - Synthetic profiles: H0 annual energy matches the requested consumption, PV is zero at night and stays centred on solar noon across the clock change, gap and spike rates match the configured probabilities
 - CSV import: offset and local timestamps, the repeated hour on the fall-back day (100 rows → 100 distinct UTC intervals), skipped spring local times, per-line errors, semicolon + decimal comma
 - Validation: all rule types (negative, spike, duplicate, outside period, missing intervals, DST interval count). A known spike in a CSV is rejected, a gap gives the exact missing-interval count, a 96-row fall-back day is flagged. Every spike injected by the synthetic generator is rejected, with no false positives on clean household, commercial and PV series (incl. sunrise ramps).
-- Background import: `ImportBackgroundService` against a fake (unbounded, completed) channel: a job is parsed, validated and completed with exact counts; an empty file completes with a parse error instead of failing; a throwing job doesn't stop the jobs behind it; host shutdown stops the loop cleanly. The bounded channel refuses jobs when full.
-- Import endpoint (in-memory `WebApplicationFactory`, no Docker needed): `202` with `Location` and the job completes in the background; the README sample file yields the documented counts; `400` for an invalid MaLo-ID, an empty file or no file; `404` for an unknown job; `503` + `Retry-After` when the queue is full
+- Background import: `ImportBackgroundService` against a fake (unbounded, completed) channel and an in-memory repository: a job is parsed, validated, gap-filled, saved once and completed with exact counts; the series is loaded with the 14 lookback days and the closing anchor; an unknown market location fails the job without saving; a delivered value supersedes an earlier substitute; a rejected reading leaves the stored value untouched; an empty file completes with a parse error instead of failing; a throwing job doesn't stop the jobs behind it; host shutdown stops the loop cleanly. The bounded channel refuses jobs when full.
+- Series repository (PostgreSQL): only values in the requested range are loaded; recorded and substituted values are saved in one unit of work; the series matching the MaLo's direction is picked when a meter location has both a consumption and a feed-in series; an unknown MaLo gives `null`
+- Import endpoint (in-memory `WebApplicationFactory` against PostgreSQL): `202` with `Location` and the job completes in the background; the README sample file yields the documented counts and is stored as 96 values with the spike and the gap interpolated; a MaLo without master data fails with a reason; `400` for an invalid MaLo-ID, an empty file or no file; `404` for an unknown job; `503` + `Retry-After` when the queue is full
 - Rounding: `decimal` arithmetic, no floating-point for energy quantities
 - Gap detection: missing and rejected intervals merge into one gap; edge gaps have no anchor on the open side; anchors just outside the period are used unless they were rejected; a complete 92-interval spring-forward day has no gaps; a gap over both passes of the repeated fall-back hour is 8 intervals long
 - Linear interpolation: gaps of exactly 1, 2, 3 and 4 intervals are filled with the exact expected values; every filled value stores the algorithm and both anchors; a 5-interval gap and a gap without a closing anchor are left unfilled; a rejected spike is overwritten in place; midpoint rounding to 5 decimals; a gap across the fall-back hour is interpolated in real time

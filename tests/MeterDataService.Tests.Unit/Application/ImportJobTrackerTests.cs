@@ -29,7 +29,7 @@ public class ImportJobTrackerTests
     public void Completed_job_carries_summary_and_finish_time()
     {
         var job = ImportChannelTests.Job();
-        var summary = new ImportSummary(RowsRead: 96, ParseErrors: 0, Accepted: 95, Rejected: 1, MissingIntervals: 0, Findings: 0);
+        var summary = new ImportSummary(RowsRead: 96, ParseErrors: 0, Accepted: 95, Rejected: 1, MissingIntervals: 0, Findings: 0, Substituted: 1);
         _tracker.MarkQueued(job);
         _tracker.MarkProcessing(job.Id);
 

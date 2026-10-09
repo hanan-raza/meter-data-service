@@ -7,8 +7,8 @@ namespace MeterDataService.Application.Import;
 /// the background service (writes the rest). Registered as a singleton.
 /// </summary>
 /// <remarks>
-/// Statuses are lost on restart and are never evicted. That is acceptable while import results aren't
-/// persisted yet; once they are, the database becomes the source of truth for finished jobs.
+/// Statuses are lost on restart and are never evicted. The imported values themselves are persisted, so a
+/// lost status only costs the client its counts, not data.
 /// </remarks>
 public sealed class ImportJobTracker(TimeProvider timeProvider)
 {
