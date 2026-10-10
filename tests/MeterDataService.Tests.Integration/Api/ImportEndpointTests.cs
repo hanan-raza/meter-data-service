@@ -2,14 +2,10 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using MeterDataService.Application.Import;
 using MeterDataService.Domain;
 using MeterDataService.Infrastructure.Persistence;
 using MeterDataService.Tests.Integration.Infrastructure;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -19,32 +15,15 @@ using Shouldly;
 
 namespace MeterDataService.Tests.Integration.Api;
 
-/// <summary>
-/// Runs the real API in memory against a PostgreSQL container. The factory runs in the Development environment,
-/// so the sample market location from <c>appsettings.Development.json</c> is seeded on start-up.
-/// </summary>
 [Trait("Category", "Integration")]
-public sealed class ImportEndpointTests : IntegrationTestBase, IDisposable
+public sealed class ImportEndpointTests(PostgreSqlFixture database) : ApiTestBase(database)
 {
     private const string ValidMaLo = SampleMasterData.MaLoId;
-
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
-
-    private readonly WebApplicationFactory<Program> _factory;
-
-    public ImportEndpointTests(PostgreSqlFixture database)
-        : base(database)
-    {
-        _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
-            builder.UseSetting("ConnectionStrings:MeterData", database.ConnectionString));
-    }
-
-    public void Dispose() => _factory.Dispose();
 
     [SkippableFact]
     public async Task Upload_returns_202_with_location_and_the_job_is_processed_in_the_background()
     {
-        using var client = _factory.CreateClient();
+        using var client = Factory.CreateClient();
 
         using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), Form(OneDayCsv(), ValidMaLo));
 
@@ -64,7 +43,7 @@ public sealed class ImportEndpointTests : IntegrationTestBase, IDisposable
     [SkippableFact]
     public async Task Documented_sample_file_is_persisted_with_its_gaps_filled()
     {
-        using var client = _factory.CreateClient();
+        using var client = Factory.CreateClient();
         var csv = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Samples", "household-one-day.csv"));
 
         using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), Form(csv, ValidMaLo));
@@ -94,7 +73,7 @@ public sealed class ImportEndpointTests : IntegrationTestBase, IDisposable
     {
         // Valid MaLo-ID, so the endpoint accepts it, but never registered.
         const string unknownMaLo = "10000000009";
-        using var client = _factory.CreateClient();
+        using var client = Factory.CreateClient();
 
         using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), Form(OneDayCsv(), unknownMaLo));
 
@@ -109,7 +88,7 @@ public sealed class ImportEndpointTests : IntegrationTestBase, IDisposable
     [InlineData("4137355924")] // too short
     public async Task Invalid_market_location_id_is_rejected_with_400(string maLo)
     {
-        using var client = _factory.CreateClient();
+        using var client = Factory.CreateClient();
 
         using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), Form(OneDayCsv(), maLo));
 
@@ -120,7 +99,7 @@ public sealed class ImportEndpointTests : IntegrationTestBase, IDisposable
     [SkippableFact]
     public async Task Empty_file_is_rejected_with_400()
     {
-        using var client = _factory.CreateClient();
+        using var client = Factory.CreateClient();
 
         using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), Form(string.Empty, ValidMaLo));
 
@@ -130,7 +109,7 @@ public sealed class ImportEndpointTests : IntegrationTestBase, IDisposable
     [SkippableFact]
     public async Task Request_without_file_is_rejected_with_400()
     {
-        using var client = _factory.CreateClient();
+        using var client = Factory.CreateClient();
         using var form = new MultipartFormDataContent { { new StringContent(ValidMaLo), "marketLocationId" } };
 
         using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), form);
@@ -141,7 +120,7 @@ public sealed class ImportEndpointTests : IntegrationTestBase, IDisposable
     [SkippableFact]
     public async Task Unknown_job_id_returns_404()
     {
-        using var client = _factory.CreateClient();
+        using var client = Factory.CreateClient();
 
         using var response = await client.GetAsync(new Uri($"/api/import/{Guid.CreateVersion7()}", UriKind.Relative));
 
@@ -152,7 +131,7 @@ public sealed class ImportEndpointTests : IntegrationTestBase, IDisposable
     public async Task Full_queue_returns_503_with_retry_after_and_forgets_the_job()
     {
         // No background service draining the queue, and room for exactly one job.
-        using var stalled = _factory.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        using var stalled = Factory.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<IHostedService>();
             services.Replace(ServiceDescriptor.Singleton(new ImportChannel(capacity: 1)));

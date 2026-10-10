@@ -25,6 +25,9 @@ public static class GermanCalendar
     public static DateOnly DayOf(DateTimeOffset instant) =>
         DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(instant, TimeZone).DateTime);
 
+    /// <summary>The same instant with the German offset in effect at that moment (+01:00 or +02:00).</summary>
+    public static DateTimeOffset ToGermanTime(DateTimeOffset instant) => TimeZoneInfo.ConvertTime(instant, TimeZone);
+
     /// <summary>Number of 15-minute intervals in the local day: 92 on the spring-forward day, 100 on the fall-back day.</summary>
     public static int IntervalsIn(DateOnly day) =>
         (int)((StartOfDayUtc(day.AddDays(1)) - StartOfDayUtc(day)) / MeasurementSeries.IntervalLength);

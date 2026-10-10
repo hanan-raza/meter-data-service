@@ -27,4 +27,16 @@ public class GermanCalendarTests
         GermanCalendar.DayOf(new DateTimeOffset(2026, 7, 14, 22, 0, 0, TimeSpan.Zero)).ShouldBe(new DateOnly(2026, 7, 15));
         GermanCalendar.DayOf(new DateTimeOffset(2026, 7, 14, 21, 45, 0, TimeSpan.Zero)).ShouldBe(new DateOnly(2026, 7, 14));
     }
+
+    [Fact]
+    public void German_time_shows_both_passes_of_the_repeated_hour_with_their_own_offset()
+    {
+        var firstPass = GermanCalendar.ToGermanTime(new DateTimeOffset(2026, 10, 25, 0, 0, 0, TimeSpan.Zero));
+        var secondPass = GermanCalendar.ToGermanTime(new DateTimeOffset(2026, 10, 25, 1, 0, 0, TimeSpan.Zero));
+
+        firstPass.DateTime.ShouldBe(new DateTime(2026, 10, 25, 2, 0, 0));
+        firstPass.Offset.ShouldBe(TimeSpan.FromHours(2));
+        secondPass.DateTime.ShouldBe(new DateTime(2026, 10, 25, 2, 0, 0));
+        secondPass.Offset.ShouldBe(TimeSpan.FromHours(1));
+    }
 }

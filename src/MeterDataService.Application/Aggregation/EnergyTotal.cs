@@ -3,6 +3,9 @@ namespace MeterDataService.Application.Aggregation;
 /// <summary>Length of the buckets energy is summed over.</summary>
 public enum AggregationGranularity
 {
+    /// <summary>The metered 15-minute interval itself: values as stored, not summed.</summary>
+    QuarterHour = 0,
+
     /// <summary>Clock hour. The fall-back day has 25 of them, two starting at local 02:00.</summary>
     Hour = 1,
 

@@ -1,5 +1,6 @@
 using MeterDataService.Application.GapFilling;
 using MeterDataService.Application.Import;
+using MeterDataService.Application.Measurements;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -17,6 +18,9 @@ public static class DependencyInjection
         services.AddSingleton(_ => new ValidationEngine());
         services.AddSingleton<GapFillingService>();
         services.AddHostedService<ImportBackgroundService>();
+
+        // Scoped like the repositories they read from.
+        services.AddScoped<MeasurementQueryService>();
         return services;
     }
 }

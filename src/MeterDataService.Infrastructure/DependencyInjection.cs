@@ -1,5 +1,7 @@
 using MeterDataService.Application.Aggregation;
 using MeterDataService.Application.Import;
+using MeterDataService.Application.MarketLocations;
+using MeterDataService.Application.Measurements;
 using MeterDataService.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,6 +17,8 @@ public static class DependencyInjection
         services.AddDbContext<MeterDataDbContext>(options => options.UseMeterDataStore(connectionString));
         services.AddScoped<IMeasurementSeriesRepository, MeasurementSeriesRepository>();
         services.AddScoped<IAggregationRepository, AggregationRepository>();
+        services.AddScoped<IMarketLocationReadRepository, MarketLocationReadRepository>();
+        services.AddScoped<IMeasurementReadRepository, MeasurementReadRepository>();
         return services;
     }
 

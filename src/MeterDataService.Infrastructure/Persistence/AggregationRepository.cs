@@ -41,7 +41,7 @@ internal sealed class AggregationRepository(MeterDataDbContext context) : IAggre
             AggregationGranularity.Hour => ("hour", Utc),
             AggregationGranularity.Day => ("day", GermanCalendar.TimeZoneId),
             AggregationGranularity.Month => ("month", GermanCalendar.TimeZoneId),
-            _ => throw new ArgumentOutOfRangeException(nameof(granularity), granularity, "Unknown granularity."),
+            _ => throw new ArgumentOutOfRangeException(nameof(granularity), granularity, "Only hours, days and months are summed."),
         };
 
         var rows = await context.Database
@@ -67,8 +67,8 @@ internal sealed class AggregationRepository(MeterDataDbContext context) : IAggre
 
         return rows
             .Select(r => new EnergyTotal(
-                ToGermanTime(r.BucketStart),
-                ToGermanTime(EndOf(r.BucketStart, granularity)),
+                GermanCalendar.ToGermanTime(r.BucketStart),
+                GermanCalendar.ToGermanTime(EndOf(r.BucketStart, granularity)),
                 r.EnergyKwh,
                 r.Intervals,
                 r.MeasuredIntervals))
@@ -85,8 +85,6 @@ internal sealed class AggregationRepository(MeterDataDbContext context) : IAggre
             _ => GermanCalendar.StartOfDayUtc(new DateOnly(day.Year, day.Month, 1).AddMonths(1)),
         };
     }
-
-    private static DateTimeOffset ToGermanTime(DateTimeOffset instant) => TimeZoneInfo.ConvertTime(instant, GermanCalendar.TimeZone);
 
 #pragma warning disable CA1812 // Instantiated by EF Core when materializing the raw SQL rows.
     private sealed class TotalRow
