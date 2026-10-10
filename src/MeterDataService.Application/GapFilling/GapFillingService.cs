@@ -11,6 +11,8 @@ public sealed partial class GapFillingService(ILogger<GapFillingService> logger)
 {
     /// <summary>Fills every gap over whole German calendar days.</summary>
     /// <param name="series">Series to fill; should hold the <see cref="SimilarDayFiller.LookbackDays"/> before <paramref name="firstDay"/>.</param>
+    /// <param name="firstDay">First German calendar day to fill (inclusive).</param>
+    /// <param name="lastDay">Last German calendar day to fill (inclusive).</param>
     /// <param name="rejectedIntervals">UTC starts of values that failed plausibility checks.</param>
     public GapFillResult Fill(
         MeasurementSeries series,

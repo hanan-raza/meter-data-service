@@ -1,3 +1,4 @@
+using MeterDataService.Application.Aggregation;
 using MeterDataService.Application.GapFilling;
 using MeterDataService.Application.Import;
 using MeterDataService.Application.Measurements;
@@ -21,6 +22,7 @@ public static class DependencyInjection
 
         // Scoped like the repositories they read from.
         services.AddScoped<MeasurementQueryService>();
+        services.AddScoped<ConsumptionQueryService>();
         return services;
     }
 }

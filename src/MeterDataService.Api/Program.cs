@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using MeterDataService.Application;
 using MeterDataService.Infrastructure;
 using MeterDataService.Infrastructure.Persistence;
+using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,7 +13,15 @@ builder.Services.AddApplication();
 builder.Services.AddInfrastructure(connectionString);
 builder.Services.AddControllers()
     .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options => options.AddDocumentTransformer((document, _, _) =>
+{
+    document.Info.Title = "meter-data-service";
+    document.Info.Description =
+        "Meter data management for the German energy market: CSV import of 15-minute values, validation, " +
+        "gap filling (Ersatzwertbildung) and aggregation per market location (Marktlokation). " +
+        "All days are German calendar days (Europe/Berlin), so a day has 92, 96 or 100 intervals.";
+    return Task.CompletedTask;
+}));
 
 var app = builder.Build();
 
@@ -25,6 +34,7 @@ if (app.Configuration.GetValue<bool>("SeedSampleMasterData"))
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    app.MapScalarApiReference();
 }
 
 app.UseHttpsRedirection();

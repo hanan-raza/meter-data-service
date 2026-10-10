@@ -1,0 +1,90 @@
+# Example requests for every endpoint: happy path first, then error cases.
+# Start the API with `dotnet run --project src/MeterDataService.Api` (Development seeds MaLo 41373559241).
+# OpenAPI: {{host}}/openapi/v1.json   Scalar UI: {{host}}/scalar/v1
+
+@host = http://localhost:5227
+@maLo = 41373559241
+
+### ── Import ────────────────────────────────────────────────────────────────
+
+### Queue a CSV file for import → 202 Accepted + Location header
+# The sample day (2026-06-10) has a spike at 18:30 and a missing 03:00 value; both get interpolated.
+POST {{host}}/api/import
+Content-Type: multipart/form-data; boundary=boundary
+
+--boundary
+Content-Disposition: form-data; name="marketLocationId"
+
+{{maLo}}
+--boundary
+Content-Disposition: form-data; name="file"; filename="household-one-day.csv"
+Content-Type: text/csv
+
+< ./samples/household-one-day.csv
+--boundary--
+
+### Poll the job status (replace the id with the one from the Location header) → 200
+GET {{host}}/api/import/00000000-0000-0000-0000-000000000000
+
+### Error: invalid MaLo-ID (wrong check digit) → 400
+POST {{host}}/api/import
+Content-Type: multipart/form-data; boundary=boundary
+
+--boundary
+Content-Disposition: form-data; name="marketLocationId"
+
+41373559242
+--boundary
+Content-Disposition: form-data; name="file"; filename="household-one-day.csv"
+Content-Type: text/csv
+
+< ./samples/household-one-day.csv
+--boundary--
+
+### Error: unknown job id → 404
+GET {{host}}/api/import/0199b9a1-0000-7000-8000-000000000000
+
+### ── Market locations (Marktlokationen) ───────────────────────────────────
+
+### List market locations, first page → 200
+GET {{host}}/api/market-locations?offset=0&limit=50
+
+### Error: page size out of range (1–500) → 400
+GET {{host}}/api/market-locations?limit=0
+
+### One market location with meter locations, installed meter and series → 200
+GET {{host}}/api/market-locations/{{maLo}}
+
+### Error: MaLo-ID with a wrong check digit → 400
+GET {{host}}/api/market-locations/41373559242
+
+### Error: valid MaLo-ID that is not registered → 404
+GET {{host}}/api/market-locations/10000000009
+
+### ── Measurements (Lastgang) ──────────────────────────────────────────────
+
+### 15-minute values of the sample day with status and substitution trace → 200
+GET {{host}}/api/market-locations/{{maLo}}/measurements?from=2026-06-10&to=2026-06-10
+
+### Hourly sums of the sample day → 200
+GET {{host}}/api/market-locations/{{maLo}}/measurements?from=2026-06-10&to=2026-06-10&granularity=Hour
+
+### Error: more than 31 days of 15-minute values → 400
+GET {{host}}/api/market-locations/{{maLo}}/measurements?from=2026-06-01&to=2026-07-15
+
+### Error: 'to' before 'from' → 400
+GET {{host}}/api/market-locations/{{maLo}}/measurements?from=2026-06-10&to=2026-06-09
+
+### ── Consumption (Energiemenge) ───────────────────────────────────────────
+
+### Daily totals of June with completeness → 200
+GET {{host}}/api/market-locations/{{maLo}}/consumption?from=2026-06-01&to=2026-06-30
+
+### Monthly totals of 2026 → 200
+GET {{host}}/api/market-locations/{{maLo}}/consumption?from=2026-01-01&to=2026-12-31&granularity=Month
+
+### Error: QuarterHour is not a consumption granularity (use /measurements) → 400
+GET {{host}}/api/market-locations/{{maLo}}/consumption?from=2026-06-10&to=2026-06-10&granularity=QuarterHour
+
+### Error: unknown market location → 404
+GET {{host}}/api/market-locations/10000000009/consumption?from=2026-06-01&to=2026-06-30

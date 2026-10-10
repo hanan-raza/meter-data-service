@@ -34,8 +34,11 @@ public sealed record ValidationResult(ValidationOutcome Outcome, ValidationRule?
 public sealed record ValidatedReading(ImportedReading Reading, ValidationResult Result);
 
 /// <summary>Finding about the period rather than a single value, e.g. a gap or a wrong interval count on a DST day.</summary>
+/// <param name="Rule">Plausibility rule that produced the finding.</param>
+/// <param name="Outcome">Severity of the finding.</param>
 /// <param name="From">Inclusive start of the affected range, in UTC.</param>
 /// <param name="To">Exclusive end of the affected range, in UTC.</param>
+/// <param name="Reason">What is wrong, in plain language.</param>
 public sealed record ValidationFinding(
     ValidationRule Rule, ValidationOutcome Outcome, DateTimeOffset From, DateTimeOffset To, string Reason);
 

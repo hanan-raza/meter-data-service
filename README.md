@@ -22,7 +22,7 @@ A background anomaly-detection pipeline (ML.NET) continuously flags suspicious p
 - Synthetic data generator: H0 household profile, commercial profile, PV feed-in profile, with injected gaps and outliers
 - Import pipeline: CSV → validation (negative values, spikes, missing intervals, DST days) → per-value status (`Measured`, `Estimated`, `Replaced`)
 - Gap filling (Ersatzwertbildung): linear interpolation for short gaps, similar-day method for long gaps — every replacement is traceable
-- Aggregation API: hourly, daily, monthly totals per market location
+- REST API: market locations, the 15-minute series with status and substitution trace, and consumption reports (hourly, daily, monthly) with completeness. Documented with OpenAPI + Scalar.
 - Anomaly detection: ML.NET spike and change-point detection with an explainable data-quality score per series
 - Background ingestion via `Channel<T>` and `BackgroundService`
 - OpenTelemetry metrics for import throughput
@@ -43,7 +43,7 @@ graph TD
     B --> C[ValidationEngine]
     C --> D[GapFillingService]
     D --> E[PostgreSQL via EF Core]
-    E --> F[AggregationApi]
+    E --> F[REST API: market locations, measurements, consumption]
     E --> G[AnomalyDetector ML.NET]
     G --> H[DataQualityScore]
 ```
@@ -193,7 +193,26 @@ value(k) = before + (after − before) · k / (n + 1)     k = 1…n, n = gap len
 - Hours are cut in UTC, which is the same as local hours because German offsets are whole hours. This keeps the two passes of the repeated 02:00 hour apart: the fall-back day has 25 hourly totals, `02:00+02:00` and `02:00+01:00`.
 - Buckets without values are omitted, so "no data" is not shown as zero consumption.
 
-See [ADR 0002](docs/adr/0002-aggregation-in-sql-with-german-time-buckets.md). The REST endpoints follow on Day 9.
+See [ADR 0002](docs/adr/0002-aggregation-in-sql-with-german-time-buckets.md).
+
+### REST API
+
+| Method | Path | Returns |
+|--------|------|---------|
+| `POST` | `/api/import` | `202` + `Location`: queues a CSV file (see [Background import](#background-import)) |
+| `GET` | `/api/import/{id}` | State and counts of an import job |
+| `GET` | `/api/market-locations?offset=&limit=` | Market locations ordered by MaLo-ID, pages of up to 500 |
+| `GET` | `/api/market-locations/{maLoId}` | Master data: direction, billed OBIS code, meter locations with installed meter and series |
+| `GET` | `/api/market-locations/{maLoId}/measurements?from=&to=&granularity=` | The energy series (Lastgang) as points |
+| `GET` | `/api/market-locations/{maLoId}/consumption?from=&to=&granularity=` | Consumption report: total, totals per bucket, completeness |
+
+- `from` and `to` are **German calendar days, both inclusive** (`2026-10-25`). A client never has to work out where a 23- or 25-hour day starts and ends in UTC.
+- **Measurements** at `QuarterHour` (default) return each stored value with its `status` and, for a substitute this service computed, its `substitution` (method, anchor values or source day). So a single interval can be explained from the API alone. `Hour`, `Day` and `Month` return sums with `intervals` and `measuredIntervals`. Every `start` / `end` carries the German offset of that instant: on 25 October 2026 the series has `02:00+02:00` and `02:00+01:00`.
+- **Consumption** sums per `Hour`, `Day` (default) or `Month`. It adds `expectedIntervals` (92 / 96 / 100 per day), `completenessPercent` and `measuredPercent`. A total built from 60 % substitutes looks the same as a measured one; the percentages show the difference. A bucket at the edge of the period covers only the requested days: a `Month` report from the 10th to the 20th holds those 11 days, not the whole month.
+- Missing intervals are left out, never returned as `0`.
+- Limits per request: 31 days of quarter hours (~3,000 points), 92 days of hours (a quarter), 3 years of days or months.
+- Errors are RFC 9457 problem details: `400` names the parameter (malformed MaLo-ID or check digit, missing or reversed dates, unknown granularity, period too long), `404` for a valid but unknown MaLo-ID.
+- The OpenAPI document (`/openapi/v1.json`) and the Scalar UI (`/scalar/v1`) are served in Development. Summaries, parameter and schema descriptions come from the XML comments of the controllers and the Application records (built-in .NET 10 OpenAPI generator, no Swashbuckle).
 
 ---
 
@@ -223,7 +242,22 @@ curl http://localhost:5227/api/import/0199b9a1-...
 
 The spike and the missing value are both interpolated, so the day is stored with 96 values: 94 `Measured`, 2 `Replaced`.
 
-`src/MeterDataService.Api/MeterDataService.Api.http` has the same requests for VS / Rider / VS Code.
+Read it back:
+
+```bash
+curl "http://localhost:5227/api/market-locations/41373559241/measurements?from=2026-06-10&to=2026-06-10"
+# {"marketLocationId":"41373559241","obisCode":"1-1:1.29.0","granularity":"QuarterHour",...,"points":[
+#   {"start":"2026-06-10T00:00:00+02:00","end":"2026-06-10T00:15:00+02:00","energyKwh":0.062,"intervals":1,
+#    "measuredIntervals":1,"status":"Measured","substitution":null}, ...
+#   {"start":"2026-06-10T03:00:00+02:00",...,"status":"Replaced",
+#    "substitution":{"method":"LinearInterpolation","anchorValueBefore":...,"anchorValueAfter":...,"sourceDay":null}}, ...]}
+
+curl "http://localhost:5227/api/market-locations/41373559241/consumption?from=2026-06-10&to=2026-06-10"
+# {...,"granularity":"Day","totalEnergyKwh":...,"intervals":96,"expectedIntervals":96,"measuredIntervals":94,
+#  "completenessPercent":100.00,"measuredPercent":97.92,"totals":[...]}
+```
+
+Browse and try all endpoints at `http://localhost:5227/scalar/v1`. [`docs/meter-data-service.http`](docs/meter-data-service.http) has a happy-path and an error request for every endpoint, for VS / Rider / VS Code.
 
 ---
 
@@ -252,6 +286,8 @@ The spike and the missing value are both interpolated, so the day is stored with
 | Plausibilisierung | Validation | Checking delivered values against plausibility rules before they are used |
 | Stammdaten | Master data | Market locations, meter locations and their series; must exist before values can be imported |
 | Korrekturlieferung | Corrected delivery | A later delivery of values for intervals already sent; it supersedes the stored values |
+| Energiemenge | Energy quantity | Energy over a period in kWh; the sum of the interval values |
+| Vollständigkeit | Completeness | Share of a period's intervals that have a stored value |
 | Zeitumstellung | Clock change | Switch to/from summer time; makes a market day 23 or 25 hours long |
 
 ---
@@ -282,6 +318,9 @@ Coverage highlights:
 - Similar-day filling: a Wednesday gap is copied from last Wednesday (preferred over the more recent Tuesday), then from two weeks back, then from another workday; Saturday uses Saturday; weekend days, days beyond 14 days, rejected or substituted source values disqualify a candidate; no candidate → `0` + `Estimated`, but a sender's estimate is kept; a zero fallback is replaced on the next run; a gap across midnight gets one source per day; DST: both passes of the repeated hour are filled from a normal Sunday, the CET pass is picked when the fall-back day is the source, the spring-forward day is skipped for its missing hour
 - Gap-filling orchestration: short gaps are interpolated even when a similar day exists, long and edge gaps go to the similar-day method, a complete day writes nothing; the similar-day trace (`source_day`) round-trips through PostgreSQL
 - Aggregation (PostgreSQL): daily totals over the 25-hour fall-back day (100 intervals, `+02:00` → `+01:00`) and the 23-hour spring-forward day (92 intervals); 25 hourly totals on the fall-back day with both 02:00 passes apart; local midnight on the 1st counts for the new month; `0.33333 × 3 + 0.00001` sums to exactly `1`; other market locations, the other direction's series and values outside the period are excluded; substituted values are counted apart from measured ones; an unknown MaLo has no totals
+- Read API (in-memory `WebApplicationFactory` against PostgreSQL): market location master data with the installed meter (not the removed one) and all series; stable, non-overlapping pages; the fall-back day as 100 quarter-hour points from `00:00+02:00` to `00:00+01:00` with status and substitution trace (interpolation anchors, similar-day source day), as 25 hourly points with both 02:00 passes, and as one 10 kWh day; an empty period gives no points instead of zeros; a consumption report over the fall-back weekend expects 196 intervals and reports 99.49 % completeness with one missing; monthly buckets start at local midnight; `400` for a bad check digit, missing / malformed / reversed dates, unknown granularity, `QuarterHour` consumption and too-long periods; `404` for an unknown MaLo
+- Reporting rules (unit): expected intervals for a 23-, 24- and 25-hour day, March (2,972), October (2,980) and a whole year (35,040); percentages rounded half away from zero; period limits per granularity at the boundary
+- OpenAPI: every endpoint is in `/openapi/v1.json` with a summary, a success and an error response; parameter and schema descriptions come from the XML comments; the Scalar page is served in Development
 - Anomaly detection: known spike sequences always flagged
 
 ---
@@ -297,6 +336,7 @@ See `docs/adr/` for Architecture Decision Records.
 
 ## Roadmap / Next Steps
 
+- Authentication and per-tenant access to market locations
 - Treat public holidays (bundeseinheitlich and per federal state) as Sundays in similar-day selection
 - MSCONS import from `edifact-energy-parser` (cross-project)
 - BenchmarkDotNet import speed benchmarks
@@ -306,4 +346,4 @@ See `docs/adr/` for Architecture Decision Records.
 
 ## Kurzfassung auf Deutsch
 
-Dieser Dienst implementiert die Kernfunktionen eines Messdatenmanagement-Systems (MDM) für den deutschen Energiemarkt. Rohdaten aus 15-Minuten-Intervallzählungen werden über eine CSV-Importpipeline eingelesen, gegen Plausibilitätsregeln geprüft und mit Statusinformationen (gemessen, geschätzt, ersetzt) versehen. Fehlende Werte werden durch Ersatzwertbildung aufgefüllt — kurze Lücken durch lineare Interpolation, längere durch das Vergleichstagverfahren (gleicher Tagestyp der letzten 14 Tage). Jede Ersetzung ist vollständig rückverfolgbar: Verfahren, Stützwerte bzw. Vergleichstag werden je Wert gespeichert. Eine ML.NET-basierte Anomalieerkennung überwacht die Lastgänge kontinuierlich im Hintergrund und berechnet einen datenqualitätsbezogenen Score je Messreihe. Jeder Import wird samt Ersatzwerten in einer Transaktion gespeichert; eine spätere Lieferung ersetzt frühere Werte. Aggregierte Verbrauchswerte (stündlich, täglich, monatlich) pro Marktlokation werden exakt als `numeric`-Summen in PostgreSQL berechnet, mit Tages- und Monatsgrenzen in deutscher Zeit. Zeitzonenkorrektheit für die Mitteleuropäische Zeitzone (MEZ/MESZ) — insbesondere die 23- und 25-Stunden-Tage — wird durch dedizierte Tests abgesichert.
+Dieser Dienst implementiert die Kernfunktionen eines Messdatenmanagement-Systems (MDM) für den deutschen Energiemarkt. Rohdaten aus 15-Minuten-Intervallzählungen werden über eine CSV-Importpipeline eingelesen, gegen Plausibilitätsregeln geprüft und mit Statusinformationen (gemessen, geschätzt, ersetzt) versehen. Fehlende Werte werden durch Ersatzwertbildung aufgefüllt — kurze Lücken durch lineare Interpolation, längere durch das Vergleichstagverfahren (gleicher Tagestyp der letzten 14 Tage). Jede Ersetzung ist vollständig rückverfolgbar: Verfahren, Stützwerte bzw. Vergleichstag werden je Wert gespeichert. Eine ML.NET-basierte Anomalieerkennung überwacht die Lastgänge kontinuierlich im Hintergrund und berechnet einen datenqualitätsbezogenen Score je Messreihe. Jeder Import wird samt Ersatzwerten in einer Transaktion gespeichert; eine spätere Lieferung ersetzt frühere Werte. Aggregierte Verbrauchswerte (stündlich, täglich, monatlich) pro Marktlokation werden exakt als `numeric`-Summen in PostgreSQL berechnet, mit Tages- und Monatsgrenzen in deutscher Zeit. Eine dokumentierte REST-API (OpenAPI, Scalar) liefert Stammdaten, den Lastgang mit Status und Ersatzwert-Herkunft je Intervall sowie Verbrauchsberichte mit Vollständigkeitsgrad. Zeitzonenkorrektheit für die Mitteleuropäische Zeitzone (MEZ/MESZ) — insbesondere die 23- und 25-Stunden-Tage — wird durch dedizierte Tests abgesichert.
