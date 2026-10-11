@@ -202,6 +202,43 @@ namespace MeterDataService.Infrastructure.Persistence.Migrations
                     b.ToTable("meter_locations", (string)null);
                 });
 
+            modelBuilder.Entity("MeterDataService.Domain.SeriesAnnotation", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityAlwaysColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("IntervalStart")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("interval_start");
+
+                    b.Property<Guid>("MeasurementSeriesId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("measurement_series_id");
+
+                    b.Property<decimal>("Score")
+                        .HasPrecision(6, 5)
+                        .HasColumnType("numeric(6,5)")
+                        .HasColumnName("score");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("type");
+
+                    b.HasKey("Id")
+                        .HasName("pk_series_annotations");
+
+                    b.HasIndex("MeasurementSeriesId", "IntervalStart")
+                        .HasDatabaseName("ix_series_annotations_measurement_series_id_interval_start");
+
+                    b.ToTable("series_annotations", (string)null);
+                });
+
             modelBuilder.Entity("MeterDataService.Domain.MeasurementSeries", b =>
                 {
                     b.HasOne("MeterDataService.Domain.MeterLocation", null)
@@ -242,6 +279,16 @@ namespace MeterDataService.Infrastructure.Persistence.Migrations
                         .HasConstraintName("fk_meter_locations_market_locations_market_location_id");
                 });
 
+            modelBuilder.Entity("MeterDataService.Domain.SeriesAnnotation", b =>
+                {
+                    b.HasOne("MeterDataService.Domain.MeasurementSeries", null)
+                        .WithMany("Annotations")
+                        .HasForeignKey("MeasurementSeriesId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_series_annotations_measurement_series_measurement_series_id");
+                });
+
             modelBuilder.Entity("MeterDataService.Domain.MarketLocation", b =>
                 {
                     b.Navigation("MeterLocations");
@@ -249,6 +296,8 @@ namespace MeterDataService.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("MeterDataService.Domain.MeasurementSeries", b =>
                 {
+                    b.Navigation("Annotations");
+
                     b.Navigation("Values");
                 });
 

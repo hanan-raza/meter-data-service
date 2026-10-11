@@ -21,8 +21,21 @@ public enum ImportJobState
 /// Values written by gap filling (Ersatzwertbildung) for the covered days, including zero fallbacks. Can exceed
 /// <paramref name="Rejected"/> + <paramref name="MissingIntervals"/> when earlier placeholders are replaced too.
 /// </param>
+/// <param name="Anomalies">Spikes and change points the anomaly detector found in the covered days.</param>
+/// <param name="QualityScore">
+/// <see cref="Quality.DataQualityScorer"/> score (0–100) of the stored series over the covered days after gap filling;
+/// null when the file held no readable values.
+/// </param>
 public sealed record ImportSummary(
-    int RowsRead, int ParseErrors, int Accepted, int Rejected, int MissingIntervals, int Findings, int Substituted);
+    int RowsRead,
+    int ParseErrors,
+    int Accepted,
+    int Rejected,
+    int MissingIntervals,
+    int Findings,
+    int Substituted,
+    int Anomalies = 0,
+    decimal? QualityScore = null);
 
 /// <summary>Where a job stands; what the client sees when polling.</summary>
 public sealed record ImportJobStatus(

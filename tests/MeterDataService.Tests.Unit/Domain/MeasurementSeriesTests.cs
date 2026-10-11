@@ -8,6 +8,51 @@ public class MeasurementSeriesTests
     private static readonly DateTimeOffset Noon = new(2026, 7, 1, 12, 0, 0, TimeSpan.FromHours(2));
 
     [Fact]
+    public void Annotate_attaches_a_finding_in_utc()
+    {
+        var series = NewSeries();
+
+        var annotation = series.Annotate(Noon, AnomalyType.Spike, 0.99876m);
+
+        series.Annotations.ShouldBe([annotation]);
+        annotation.MeasurementSeriesId.ShouldBe(series.Id);
+        annotation.IntervalStart.ShouldBe(Noon);
+        annotation.IntervalStart.Offset.ShouldBe(TimeSpan.Zero);
+        annotation.Type.ShouldBe(AnomalyType.Spike);
+        annotation.Score.ShouldBe(0.99876m);
+    }
+
+    [Theory]
+    [InlineData(-0.1)]
+    [InlineData(1.1)]
+    [InlineData(0.123456)]
+    public void Annotate_rejects_a_score_outside_0_to_1_or_finer_than_the_stored_scale(double score)
+    {
+        Should.Throw<ArgumentOutOfRangeException>(() => NewSeries().Annotate(Noon, AnomalyType.Spike, (decimal)score));
+    }
+
+    [Fact]
+    public void Annotate_rejects_an_unknown_type()
+    {
+        Should.Throw<ArgumentOutOfRangeException>(() => NewSeries().Annotate(Noon, (AnomalyType)99, 0.5m));
+    }
+
+    [Fact]
+    public void ClearAnnotations_removes_only_findings_inside_the_half_open_range()
+    {
+        var series = NewSeries();
+        var before = series.Annotate(Noon.AddMinutes(-15), AnomalyType.Spike, 0.99m);
+        series.Annotate(Noon, AnomalyType.Spike, 0.99m);
+        series.Annotate(Noon, AnomalyType.ChangePoint, 0.96m);
+        var atEnd = series.Annotate(Noon.AddHours(1), AnomalyType.Spike, 0.99m);
+
+        var removed = series.ClearAnnotations(Noon, Noon.AddHours(1));
+
+        removed.ShouldBe(2);
+        series.Annotations.ShouldBe([before, atEnd], ignoreOrder: true);
+    }
+
+    [Fact]
     public void Record_adds_a_value_for_a_new_interval()
     {
         var series = NewSeries();

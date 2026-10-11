@@ -75,6 +75,39 @@ public sealed class MeasurementSeriesRepositoryTests(PostgreSqlFixture database)
     }
 
     [SkippableFact]
+    public async Task Annotations_in_range_are_loaded_and_replaced_findings_are_deleted()
+    {
+        var seriesId = await SaveMarketLocationAsync("40000000006", EnergyDirection.Consumption, s =>
+        {
+            s.Annotate(At(9, 45), AnomalyType.Spike, 0.99m);
+            s.Annotate(At(10, 30), AnomalyType.Spike, 0.995m);
+        });
+
+        await using (var scope = CreateScope())
+        {
+            var repository = Repository(scope);
+            var series = (await repository.FindEnergySeriesAsync("40000000006", At(10, 0), At(11, 0), CancellationToken.None)).ShouldNotBeNull();
+            series.Annotations.ShouldHaveSingleItem().IntervalStart.ShouldBe(At(10, 30));
+
+            // What a new detector run over 10:00–11:00 does: drop the old findings, add its own.
+            series.ClearAnnotations(At(10, 0), At(11, 0));
+            series.Annotate(At(10, 45), AnomalyType.ChangePoint, 0.96123m);
+            await repository.SaveChangesAsync(CancellationToken.None);
+        }
+
+        await using var context = CreateDbContext();
+        var stored = await context.SeriesAnnotations
+            .Where(a => a.MeasurementSeriesId == seriesId)
+            .OrderBy(a => a.IntervalStart)
+            .ToListAsync();
+        stored.Select(a => (a.IntervalStart, a.Type, a.Score)).ShouldBe(
+        [
+            (At(9, 45), AnomalyType.Spike, 0.99m),
+            (At(10, 45), AnomalyType.ChangePoint, 0.96123m),
+        ]);
+    }
+
+    [SkippableFact]
     public async Task Unknown_market_location_gives_null()
     {
         await using var scope = CreateScope();

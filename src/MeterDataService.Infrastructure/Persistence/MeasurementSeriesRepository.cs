@@ -25,8 +25,11 @@ internal sealed class MeasurementSeriesRepository(MeterDataDbContext context) : 
 
         // Filtered include: a series holds years of values, the import only needs a few weeks of them.
         // Several meter locations with an energy series (e.g. sum metering) would be ambiguous here, so Single.
+        // Split query: two collection includes in one join would return every value once per annotation.
         return await context.MeasurementSeries
             .Include(s => s.Values.Where(v => v.IntervalStart >= fromUtc && v.IntervalStart < toUtc))
+            .Include(s => s.Annotations.Where(a => a.IntervalStart >= fromUtc && a.IntervalStart < toUtc))
+            .AsSplitQuery()
             .Where(s => s.ObisCode == obisCode
                 && context.MeterLocations.Any(m => m.Id == s.MeterLocationId && m.MarketLocationId == marketLocation.Id))
             .SingleOrDefaultAsync(cancellationToken);

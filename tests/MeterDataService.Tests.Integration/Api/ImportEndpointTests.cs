@@ -37,7 +37,8 @@ public sealed class ImportEndpointTests(PostgreSqlFixture database) : ApiTestBas
         var finished = await PollUntilFinished(client, response.Headers.Location);
         finished.State.ShouldBe(ImportJobState.Completed);
         finished.Summary.ShouldBe(new ImportSummary(
-            RowsRead: 96, ParseErrors: 0, Accepted: 96, Rejected: 0, MissingIntervals: 0, Findings: 0, Substituted: 0));
+            RowsRead: 96, ParseErrors: 0, Accepted: 96, Rejected: 0, MissingIntervals: 0, Findings: 0, Substituted: 0,
+            Anomalies: 0, QualityScore: 100m));
     }
 
     [SkippableFact]
@@ -53,8 +54,10 @@ public sealed class ImportEndpointTests(PostgreSqlFixture database) : ApiTestBas
         finished.State.ShouldBe(ImportJobState.Completed);
 
         // The README shows this result: the 18:30 spike is rejected and 03:00 is missing; both are interpolated.
+        // Score: 70 × 94/96 metered + 20 for filling both gaps + 10 without anomalies.
         finished.Summary.ShouldBe(new ImportSummary(
-            RowsRead: 95, ParseErrors: 0, Accepted: 94, Rejected: 1, MissingIntervals: 1, Findings: 1, Substituted: 2));
+            RowsRead: 95, ParseErrors: 0, Accepted: 94, Rejected: 1, MissingIntervals: 1, Findings: 1, Substituted: 2,
+            Anomalies: 0, QualityScore: 98.54m));
 
         var day = new DateOnly(2026, 6, 10);
         await using var context = CreateDbContext();

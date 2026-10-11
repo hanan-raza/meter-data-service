@@ -19,5 +19,11 @@ internal sealed class MeasurementSeriesConfiguration : IEntityTypeConfiguration<
             .HasForeignKey(v => v.MeasurementSeriesId)
             .OnDelete(DeleteBehavior.Cascade);
         builder.Navigation(s => s.Values).HasField("_values");
+
+        builder.HasMany(s => s.Annotations)
+            .WithOne()
+            .HasForeignKey(a => a.MeasurementSeriesId)
+            .OnDelete(DeleteBehavior.Cascade);
+        builder.Navigation(s => s.Annotations).HasField("_annotations");
     }
 }

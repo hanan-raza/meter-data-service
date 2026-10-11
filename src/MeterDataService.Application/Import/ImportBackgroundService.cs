@@ -1,4 +1,5 @@
 using MeterDataService.Application.GapFilling;
+using MeterDataService.Application.Quality;
 using MeterDataService.Domain;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -8,8 +9,8 @@ namespace MeterDataService.Application.Import;
 
 /// <summary>
 /// Takes queued CSV files off the <see cref="ImportChannel"/> one at a time, parses them, runs the plausibility
-/// checks (Plausibilisierung) and gap filling (Ersatzwertbildung), persists the result and records the outcome
-/// in the <see cref="ImportJobTracker"/>.
+/// checks (Plausibilisierung) and gap filling (Ersatzwertbildung), annotates anomalies, persists the result and
+/// records the outcome with a data-quality score in the <see cref="ImportJobTracker"/>.
 /// </summary>
 /// <remarks>
 /// Uploads only enqueue, so a slow or large import never holds an HTTP request open. Jobs are processed
@@ -20,6 +21,7 @@ public sealed partial class ImportBackgroundService(
     ImportJobTracker tracker,
     ValidationEngine validationEngine,
     GapFillingService gapFillingService,
+    IAnomalyDetector anomalyDetector,
     IServiceScopeFactory scopeFactory,
     ILogger<ImportBackgroundService> logger) : BackgroundService
 {
@@ -63,7 +65,7 @@ public sealed partial class ImportBackgroundService(
             }
 
             tracker.MarkCompleted(job.Id, summary);
-            LogImportCompleted(job.FileName, summary.RowsRead, summary.ParseErrors, summary.Accepted, summary.Rejected, summary.MissingIntervals, summary.Substituted);
+            LogImportCompleted(job.FileName, summary.RowsRead, summary.ParseErrors, summary.Accepted, summary.Rejected, summary.MissingIntervals, summary.Substituted, summary.Anomalies, summary.QualityScore);
         }
 #pragma warning disable CA1031 // One broken job must not stop the loop, or every job behind it waits forever.
         catch (Exception ex)
@@ -85,6 +87,8 @@ public sealed partial class ImportBackgroundService(
         var report = validationEngine.Validate(parsed.Readings);
 
         var substituted = 0;
+        var anomalies = 0;
+        decimal? qualityScore = null;
         if (parsed.Readings.Count > 0)
         {
             var firstDay = GermanCalendar.DayOf(parsed.Readings.Min(r => r.IntervalStart));
@@ -113,6 +117,10 @@ public sealed partial class ImportBackgroundService(
             }
 
             substituted = gapFillingService.Fill(series, firstDay, lastDay).Replaced.Count;
+
+            // After gap filling, so detection sees the series as it will be billed and the score counts the substitutes.
+            anomalies = anomalyDetector.Annotate(series, firstDay, lastDay).Count;
+            qualityScore = DataQualityScorer.Score(series, firstDay, lastDay).Score;
             await repository.SaveChangesAsync(cancellationToken);
         }
 
@@ -123,13 +131,15 @@ public sealed partial class ImportBackgroundService(
             Rejected: report.Values.Count(v => v.Result.Outcome == ValidationOutcome.Rejected),
             MissingIntervals: report.MissingIntervals.Count,
             Findings: report.Findings.Count,
-            Substituted: substituted);
+            Substituted: substituted,
+            Anomalies: anomalies,
+            QualityScore: qualityScore);
         return (summary, string.Empty);
     }
 
     [LoggerMessage(Level = LogLevel.Information,
-        Message = "Imported {FileName}: {RowsRead} rows read, {ParseErrors} parse errors, {Accepted} accepted, {Rejected} rejected, {MissingIntervals} missing intervals, {Substituted} substituted")]
-    private partial void LogImportCompleted(string fileName, int rowsRead, int parseErrors, int accepted, int rejected, int missingIntervals, int substituted);
+        Message = "Imported {FileName}: {RowsRead} rows read, {ParseErrors} parse errors, {Accepted} accepted, {Rejected} rejected, {MissingIntervals} missing intervals, {Substituted} substituted, {Anomalies} anomalies, quality score {QualityScore}")]
+    private partial void LogImportCompleted(string fileName, int rowsRead, int parseErrors, int accepted, int rejected, int missingIntervals, int substituted, int anomalies, decimal? qualityScore);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Import of {FileName} refused: {Reason}")]
     private partial void LogImportRefused(string fileName, string reason);

@@ -15,6 +15,8 @@ public sealed class MeterDataDbContext(DbContextOptions<MeterDataDbContext> opti
 
     public DbSet<MeasurementValue> MeasurementValues => Set<MeasurementValue>();
 
+    public DbSet<SeriesAnnotation> SeriesAnnotations => Set<SeriesAnnotation>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder) =>
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(MeterDataDbContext).Assembly);
 }

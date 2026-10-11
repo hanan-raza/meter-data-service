@@ -12,7 +12,7 @@ In the liberalized German energy market, metering point operators (Messstellenbe
 
 This service models the full meter data lifecycle: ingesting raw CSV readings, validating each value against plausibility rules, applying gap-filling algorithms (Ersatzwertbildung) with full traceability, and exposing aggregated consumption via a clean REST API.
 
-A background anomaly-detection pipeline (ML.NET) continuously flags suspicious patterns — giving grid operators an early warning before a gap becomes a billing dispute.
+Every import also runs ML.NET anomaly detection over the delivered days and rates them with a data-quality score, flagging suspicious patterns — giving grid operators an early warning before a bad value becomes a billing dispute.
 
 ---
 
@@ -23,7 +23,7 @@ A background anomaly-detection pipeline (ML.NET) continuously flags suspicious p
 - Import pipeline: CSV → validation (negative values, spikes, missing intervals, DST days) → per-value status (`Measured`, `Estimated`, `Replaced`)
 - Gap filling (Ersatzwertbildung): linear interpolation for short gaps, similar-day method for long gaps — every replacement is traceable
 - REST API: market locations, the 15-minute series with status and substitution trace, and consumption reports (hourly, daily, monthly) with completeness. Documented with OpenAPI + Scalar.
-- Anomaly detection: ML.NET spike and change-point detection with an explainable data-quality score per series
+- Anomaly detection: ML.NET spike and change-point detection, stored as annotations per interval, plus an explainable data-quality score (0–100) per import
 - Background ingestion via `Channel<T>` and `BackgroundService`
 - OpenTelemetry metrics for import throughput
 
@@ -42,10 +42,10 @@ graph TD
     A[CSV Import] --> B[ImportPipeline BackgroundService]
     B --> C[ValidationEngine]
     C --> D[GapFillingService]
-    D --> E[PostgreSQL via EF Core]
+    D --> G[AnomalyDetector ML.NET]
+    G --> H[DataQualityScorer]
+    H --> E[PostgreSQL via EF Core]
     E --> F[REST API: market locations, measurements, consumption]
-    E --> G[AnomalyDetector ML.NET]
-    G --> H[DataQualityScore]
 ```
 
 ### Data model
@@ -56,6 +56,7 @@ erDiagram
     METER_LOCATION ||--o{ METER : "has installed (over time)"
     METER_LOCATION ||--o{ MEASUREMENT_SERIES : "records"
     MEASUREMENT_SERIES ||--o{ MEASUREMENT_VALUE : "contains"
+    MEASUREMENT_SERIES ||--o{ SERIES_ANNOTATION : "is annotated by"
     MARKET_LOCATION {
         uuid id
         char malo_id
@@ -84,6 +85,12 @@ erDiagram
         numeric anchor_value_before
         numeric anchor_value_after
         date source_day
+    }
+    SERIES_ANNOTATION {
+        bigint id
+        timestamptz interval_start
+        string type
+        numeric score
     }
 ```
 
@@ -144,6 +151,7 @@ sequenceDiagram
     B->>B: parse → validate
     B->>R: FindEnergySeriesAsync (period + 14 lookback days)
     B->>B: record accepted values → GapFillingService
+    B->>B: AnomalyDetector → DataQualityScorer
     B->>R: SaveChangesAsync (one transaction)
     B->>T: Processing → Completed (summary) / Failed
     C->>E: GET /api/import/{id}
@@ -152,7 +160,7 @@ sequenceDiagram
 
 - The upload endpoint only checks the request (file present and non-empty, valid MaLo-ID with check digit, max 10 MB), reads the file, and queues an `ImportJob`. It never parses on the request thread.
 - `ImportChannel` wraps a **bounded** `Channel<ImportJob>` (capacity 100). When it is full, the endpoint answers `503` with `Retry-After: 30` instead of buffering file contents without limit.
-- `ImportBackgroundService` reads jobs one at a time, so two files for the same market location can never race on the same intervals. It runs `CsvImportParser` → `ValidationEngine` → `GapFillingService` and persists the result, then stores the counts in `ImportJobTracker`. A job that throws is marked `Failed` and the loop goes on. Rejected rows don't fail a job; they show up in the counts.
+- `ImportBackgroundService` reads jobs one at a time, so two files for the same market location can never race on the same intervals. It runs `CsvImportParser` → `ValidationEngine` → `GapFillingService` → `IAnomalyDetector` → `DataQualityScorer` and persists the result, then stores the counts and the quality score in `ImportJobTracker`. A job that throws is marked `Failed` and the loop goes on. Rejected rows don't fail a job; they show up in the counts.
 - **Persistence**: per job, a DI scope gives a fresh `DbContext` behind `IMeasurementSeriesRepository` (unit of work). It loads the market location's energy series (OBIS `1-1:1.29.0` for consumption, `1-1:2.29.0` for generation). Only the values of the file's days, the 14 lookback days of the similar-day method, and the first value after the period (the closing interpolation anchor) are loaded. Accepted values are recorded and gaps are filled, all in memory. Then everything is saved in one transaction, so a job is stored completely or not at all.
 - **A later delivery wins**: an accepted value overwrites what is stored for its interval, including an earlier substitute, whose trace is dropped. A **rejected** reading is not stored at all. A good value from an earlier delivery stays, and an interval without one becomes a gap.
 - A market location without master data (Stammdaten) is refused: the job ends `Failed` with the reason. Master data normally arrives via market communication (UTILMD). For the quick start, `SeedSampleMasterData` (on in `appsettings.Development.json`) creates the sample MaLo `41373559241` with one meter location and its consumption series.
@@ -183,6 +191,27 @@ value(k) = before + (after − before) · k / (n + 1)     k = 1…n, n = gap len
 - Slices are matched by local wall-clock time. Both passes of the repeated hour on the fall-back day get the single hour of the source day. A spring-forward source day lacks 02:00–03:00, so it can't serve that slice. A gap crossing midnight is split per day, and each part gets its own source.
 - Every filled value stores `replaced_by = SimilarDay` and `source_day`, the German calendar day it was copied from.
 - **Fallback:** without a candidate, the values are set to `0` with status `Estimated` and `replaced_by = ZeroFallback`. Because `Estimated` counts as a gap, the next run replaces these placeholders as soon as a similar day exists, and they never anchor an interpolation. An estimate the sender delivered itself is kept rather than overwritten with zero.
+
+### Anomaly detection and data quality
+
+After gap filling, the import runs `AnomalyDetector` (`MeterDataService.Infrastructure`, ML.NET `Microsoft.ML.TimeSeries`) over the file's days. Each finding is stored as a `SeriesAnnotation` on the interval: `type` (`Spike` / `ChangePoint`) and `score` (detector confidence 0–1, i.e. 1 − p-value). The value itself is never changed: an anomaly is a hint for a person to check, not proof that the value is wrong. Re-importing a day replaces its annotations instead of piling up duplicates.
+
+- **Spike** (`DetectIidSpike`, 99 % confidence): each value against a sliding one-day history of raw values. Yesterday's evening peak is still in the window when today's arrives, so the daily shape of a household isn't flagged.
+- **Change point** (`DetectIidChangePoint`, 95 % confidence, 3-hour martingale window): a lasting level shift, e.g. a new consumer or a wrong transformer factor. It runs on the **difference to the same local time one week earlier**, not on the raw values. Within a few hours a raw load profile is all ramps, and every morning would count as a change. The week-over-week difference removes the daily and weekday shape. Comparison is by local wall-clock time, so the week after a clock change compares 18:00 with 18:00 rather than with 17:00. Change points need seven days of history; the import loads 14 anyway for the similar-day method.
+- `Estimated` placeholders (zero fallbacks) are left out of the input: a data gap is not a load anomaly, and the quality score counts it already.
+- Same input, same findings: fixed ML.NET seed, deterministic transforms.
+
+The tuning comes from synthetic profiles: a 1.5× shift in a household profile is found within two intervals, and clean profiles raise about one false alarm per hundred days. See [ADR 0003](docs/adr/0003-anomaly-detection-on-week-over-week-differences.md).
+
+`DataQualityScorer` (`MeterDataService.Application`) rates a series over whole German calendar days from 0 to 100. It uses only `decimal` arithmetic over counts, so the score is deterministic and can be recomputed by hand:
+
+| Points | Factor |
+|-------:|--------|
+| 70 | share of the expected intervals (92 / 96 / 100 per day) with a `Measured` value |
+| 20 | share of the non-metered intervals that got an algorithmic substitute (`Replaced`); placeholders and missing values earn nothing; full points if nothing needed filling |
+| 10 | share of intervals the detector could inspect × (1 − anomalies per day / 4), never below 0 |
+
+`DataQualityScore` returns the score (2 decimals, half away from zero) together with the counts it came from. The import summary carries `anomalies` and `qualityScore` for the imported days.
 
 ### Aggregation
 
@@ -237,10 +266,11 @@ curl -i -F "file=@docs/samples/household-one-day.csv" -F "marketLocationId=41373
 
 curl http://localhost:5227/api/import/0199b9a1-...
 # {"jobId":"0199b9a1-...","marketLocationId":"41373559241","fileName":"household-one-day.csv","state":"Completed",
-#  ...,"summary":{"rowsRead":95,"parseErrors":0,"accepted":94,"rejected":1,"missingIntervals":1,"findings":1,"substituted":2}}
+#  ...,"summary":{"rowsRead":95,"parseErrors":0,"accepted":94,"rejected":1,"missingIntervals":1,"findings":1,"substituted":2,
+#  "anomalies":0,"qualityScore":98.54}}
 ```
 
-The spike and the missing value are both interpolated, so the day is stored with 96 values: 94 `Measured`, 2 `Replaced`.
+The spike and the missing value are both interpolated, so the day is stored with 96 values: 94 `Measured`, 2 `Replaced`. Quality score: 70 × 94/96 + 20 (both gaps filled) + 10 (no anomalies) = 98.54.
 
 Read it back:
 
@@ -289,6 +319,10 @@ Browse and try all endpoints at `http://localhost:5227/scalar/v1`. [`docs/meter-
 | Energiemenge | Energy quantity | Energy over a period in kWh; the sum of the interval values |
 | Vollständigkeit | Completeness | Share of a period's intervals that have a stored value |
 | Zeitumstellung | Clock change | Switch to/from summer time; makes a market day 23 or 25 hours long |
+| Auffälligkeit | Anomaly | An interval a detector finds suspicious; stored as an annotation, the value stays untouched |
+| Ausreißer | Spike | A single value far off the recent level |
+| Strukturbruch | Change point | The level of a load profile shifts and stays there |
+| Datenqualität | Data quality | How complete, metered and inconspicuous a series is over a period; scored 0–100 |
 
 ---
 
@@ -321,7 +355,9 @@ Coverage highlights:
 - Read API (in-memory `WebApplicationFactory` against PostgreSQL): market location master data with the installed meter (not the removed one) and all series; stable, non-overlapping pages; the fall-back day as 100 quarter-hour points from `00:00+02:00` to `00:00+01:00` with status and substitution trace (interpolation anchors, similar-day source day), as 25 hourly points with both 02:00 passes, and as one 10 kWh day; an empty period gives no points instead of zeros; a consumption report over the fall-back weekend expects 196 intervals and reports 99.49 % completeness with one missing; monthly buckets start at local midnight; `400` for a bad check digit, missing / malformed / reversed dates, unknown granularity, `QuarterHour` consumption and too-long periods; `404` for an unknown MaLo
 - Reporting rules (unit): expected intervals for a 23-, 24- and 25-hour day, March (2,972), October (2,980) and a whole year (35,040); percentages rounded half away from zero; period limits per granularity at the boundary
 - OpenAPI: every endpoint is in `/openapi/v1.json` with a summary, a success and an error response; parameter and schema descriptions come from the XML comments; the Scalar page is served in Development
-- Anomaly detection: known spike sequences always flagged
+- Anomaly detection (ML.NET, unit): two injected spikes produce `Spike` annotations at exactly those intervals; a tripled base load and a 1.5× household load give a `ChangePoint` within two hours of the shift; no findings on clean commercial, constant or household series (daily shape not flagged); at most one finding in three clean weeks for five seeds; no change points across the week after the spring-forward day (local-time comparison); no change points without a week of history; zero-fallback placeholders and history days are not annotated; a second run gives identical annotations and replaces the first
+- Data-quality score (unit): 100 for a complete metered day; a mixed day (metered, replaced, estimated, missing, anomalies) gives the hand-calculated 75.52; 92 / 100 expected intervals on DST days; anomaly points per day and never negative; empty day 0; values and annotations outside the period ignored; identical input (in any order) gives an identical score
+- Annotations (unit + PostgreSQL): score range and scale guarded; clearing removes only the half-open range; annotations in range are loaded with the series and replaced findings are deleted on save; the import summary carries anomalies and quality score
 
 ---
 
@@ -331,6 +367,7 @@ See `docs/adr/` for Architecture Decision Records.
 
 - [ADR 0001 — Persistence model for interval meter data](docs/adr/0001-persistence-model-for-interval-data.md): `decimal(18,5)`, UTC `timestamptz`, UUIDv7 keys, 1:n MaLo–MeLo simplification
 - [ADR 0002 — Aggregation in SQL with German-time buckets](docs/adr/0002-aggregation-in-sql-with-german-time-buckets.md): exact `numeric` sums in PostgreSQL, days/months cut in `Europe/Berlin`, hours in UTC so the repeated hour stays two buckets
+- [ADR 0003 — Anomaly detection on week-over-week differences](docs/adr/0003-anomaly-detection-on-week-over-week-differences.md): IID spike on raw values, IID change point on the difference to the same local time a week earlier; findings as annotations, values untouched
 
 ---
 
@@ -346,4 +383,4 @@ See `docs/adr/` for Architecture Decision Records.
 
 ## Kurzfassung auf Deutsch
 
-Dieser Dienst implementiert die Kernfunktionen eines Messdatenmanagement-Systems (MDM) für den deutschen Energiemarkt. Rohdaten aus 15-Minuten-Intervallzählungen werden über eine CSV-Importpipeline eingelesen, gegen Plausibilitätsregeln geprüft und mit Statusinformationen (gemessen, geschätzt, ersetzt) versehen. Fehlende Werte werden durch Ersatzwertbildung aufgefüllt — kurze Lücken durch lineare Interpolation, längere durch das Vergleichstagverfahren (gleicher Tagestyp der letzten 14 Tage). Jede Ersetzung ist vollständig rückverfolgbar: Verfahren, Stützwerte bzw. Vergleichstag werden je Wert gespeichert. Eine ML.NET-basierte Anomalieerkennung überwacht die Lastgänge kontinuierlich im Hintergrund und berechnet einen datenqualitätsbezogenen Score je Messreihe. Jeder Import wird samt Ersatzwerten in einer Transaktion gespeichert; eine spätere Lieferung ersetzt frühere Werte. Aggregierte Verbrauchswerte (stündlich, täglich, monatlich) pro Marktlokation werden exakt als `numeric`-Summen in PostgreSQL berechnet, mit Tages- und Monatsgrenzen in deutscher Zeit. Eine dokumentierte REST-API (OpenAPI, Scalar) liefert Stammdaten, den Lastgang mit Status und Ersatzwert-Herkunft je Intervall sowie Verbrauchsberichte mit Vollständigkeitsgrad. Zeitzonenkorrektheit für die Mitteleuropäische Zeitzone (MEZ/MESZ) — insbesondere die 23- und 25-Stunden-Tage — wird durch dedizierte Tests abgesichert.
+Dieser Dienst implementiert die Kernfunktionen eines Messdatenmanagement-Systems (MDM) für den deutschen Energiemarkt. Rohdaten aus 15-Minuten-Intervallzählungen werden über eine CSV-Importpipeline eingelesen, gegen Plausibilitätsregeln geprüft und mit Statusinformationen (gemessen, geschätzt, ersetzt) versehen. Fehlende Werte werden durch Ersatzwertbildung aufgefüllt — kurze Lücken durch lineare Interpolation, längere durch das Vergleichstagverfahren (gleicher Tagestyp der letzten 14 Tage). Jede Ersetzung ist vollständig rückverfolgbar: Verfahren, Stützwerte bzw. Vergleichstag werden je Wert gespeichert. Bei jedem Import markiert eine ML.NET-basierte Anomalieerkennung Ausreißer und Strukturbrüche im Lastgang als Vermerke, ohne die Werte zu verändern, und ein nachvollziehbarer Datenqualitäts-Score (0–100) bewertet die importierten Tage. Jeder Import wird samt Ersatzwerten in einer Transaktion gespeichert; eine spätere Lieferung ersetzt frühere Werte. Aggregierte Verbrauchswerte (stündlich, täglich, monatlich) pro Marktlokation werden exakt als `numeric`-Summen in PostgreSQL berechnet, mit Tages- und Monatsgrenzen in deutscher Zeit. Eine dokumentierte REST-API (OpenAPI, Scalar) liefert Stammdaten, den Lastgang mit Status und Ersatzwert-Herkunft je Intervall sowie Verbrauchsberichte mit Vollständigkeitsgrad. Zeitzonenkorrektheit für die Mitteleuropäische Zeitzone (MEZ/MESZ) — insbesondere die 23- und 25-Stunden-Tage — wird durch dedizierte Tests abgesichert.

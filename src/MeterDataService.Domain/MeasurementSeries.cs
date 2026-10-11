@@ -19,6 +19,7 @@ public sealed class MeasurementSeries
     public static readonly TimeSpan IntervalLength = TimeSpan.FromMinutes(15);
 
     private readonly List<MeasurementValue> _values = [];
+    private readonly List<SeriesAnnotation> _annotations = [];
 
     // Required by EF Core for materialization.
     private MeasurementSeries()
@@ -46,6 +47,9 @@ public sealed class MeasurementSeries
     public string ObisCode { get; private set; }
 
     public IReadOnlyCollection<MeasurementValue> Values => _values;
+
+    /// <summary>Anomaly detector findings on intervals of this series.</summary>
+    public IReadOnlyCollection<SeriesAnnotation> Annotations => _annotations;
 
     /// <summary>OBIS code of the series that carries a market location's billed energy in the given direction.</summary>
     public static string EnergyObisCodeFor(EnergyDirection direction) => direction switch
@@ -93,5 +97,23 @@ public sealed class MeasurementSeries
             ?? AddValue(utc, value, trace.ResultingStatus);
         measurement.Replace(value, trace);
         return measurement;
+    }
+
+    public SeriesAnnotation Annotate(DateTimeOffset intervalStart, AnomalyType type, decimal score)
+    {
+        var annotation = new SeriesAnnotation(Id, intervalStart, type, score);
+        _annotations.Add(annotation);
+        return annotation;
+    }
+
+    /// <summary>
+    /// Drops the findings for intervals in [<paramref name="from"/>, <paramref name="to"/>), so a detector run
+    /// over a re-imported period replaces the earlier findings instead of piling up duplicates.
+    /// </summary>
+    public int ClearAnnotations(DateTimeOffset from, DateTimeOffset to)
+    {
+        var fromUtc = from.ToUniversalTime();
+        var toUtc = to.ToUniversalTime();
+        return _annotations.RemoveAll(a => a.IntervalStart >= fromUtc && a.IntervalStart < toUtc);
     }
 }

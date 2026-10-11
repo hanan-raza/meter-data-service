@@ -3,6 +3,7 @@ using System.Text;
 using System.Threading.Channels;
 using MeterDataService.Application.GapFilling;
 using MeterDataService.Application.Import;
+using MeterDataService.Application.Quality;
 using MeterDataService.Domain;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -22,6 +23,7 @@ public sealed class ImportBackgroundServiceTests : IDisposable
     private readonly Channel<ImportJob> _fakeChannel = Channel.CreateUnbounded<ImportJob>();
 
     private readonly FakeMeasurementSeriesRepository _repository = new();
+    private readonly FakeAnomalyDetector _detector = new();
     private readonly ServiceProvider _services;
 
     public ImportBackgroundServiceTests()
@@ -46,7 +48,8 @@ public sealed class ImportBackgroundServiceTests : IDisposable
         var status = _tracker.Find(job.Id).ShouldNotBeNull();
         status.State.ShouldBe(ImportJobState.Completed);
         status.Summary.ShouldBe(new ImportSummary(
-            RowsRead: 95, ParseErrors: 1, Accepted: 94, Rejected: 1, MissingIntervals: 1, Findings: 1, Substituted: 2));
+            RowsRead: 95, ParseErrors: 1, Accepted: 94, Rejected: 1, MissingIntervals: 1, Findings: 1, Substituted: 2,
+            Anomalies: 0, QualityScore: 98.54m));
 
         _repository.Saves.ShouldBe(1);
         var values = _repository.Series.Values;
@@ -55,6 +58,23 @@ public sealed class ImportBackgroundServiceTests : IDisposable
         values.Where(v => v.Status == MeasurementStatus.Replaced).Select(v => v.IntervalStart)
             .ShouldBe([At(12, 0), At(13, 0)], ignoreOrder: true);
         values.Single(v => v.IntervalStart == At(12, 0)).ReplacedBy.ShouldBe(ReplacementMethod.LinearInterpolation);
+    }
+
+    [Fact]
+    public async Task Imported_days_are_annotated_and_the_findings_lower_the_quality_score()
+    {
+        _detector.Spikes.Add(At(9, 0));
+        var job = Enqueue(DayCsv());
+
+        await RunUntilChannelIsDrained();
+
+        _detector.Calls.ShouldHaveSingleItem().ShouldBe((new DateOnly(2026, 6, 10), new DateOnly(2026, 6, 10)));
+        _repository.Series.Annotations.ShouldHaveSingleItem().IntervalStart.ShouldBe(At(9, 0).ToUniversalTime());
+
+        // Fully metered, nothing to fill, one anomaly in one day: 70 + 20 + 10 × (1 − 1/4).
+        var summary = _tracker.Find(job.Id).ShouldNotBeNull().Summary.ShouldNotBeNull();
+        summary.Anomalies.ShouldBe(1);
+        summary.QualityScore.ShouldBe(97.5m);
     }
 
     [Fact]
@@ -198,8 +218,23 @@ public sealed class ImportBackgroundServiceTests : IDisposable
             _tracker,
             new ValidationEngine(),
             new GapFillingService(NullLogger<GapFillingService>.Instance),
+            _detector,
             _services.GetRequiredService<IServiceScopeFactory>(),
             NullLogger<ImportBackgroundService>.Instance);
+
+    /// <summary>Flags the configured intervals as spikes and records the periods it was asked about.</summary>
+    private sealed class FakeAnomalyDetector : IAnomalyDetector
+    {
+        public List<DateTimeOffset> Spikes { get; } = [];
+
+        public List<(DateOnly FirstDay, DateOnly LastDay)> Calls { get; } = [];
+
+        public IReadOnlyList<SeriesAnnotation> Annotate(MeasurementSeries series, DateOnly firstDay, DateOnly lastDay)
+        {
+            Calls.Add((firstDay, lastDay));
+            return Spikes.Select(start => series.Annotate(start, AnomalyType.Spike, 0.995m)).ToList();
+        }
+    }
 
     /// <summary>Holds one series in memory, as if every value of it had been loaded.</summary>
     private sealed class FakeMeasurementSeriesRepository : IMeasurementSeriesRepository
