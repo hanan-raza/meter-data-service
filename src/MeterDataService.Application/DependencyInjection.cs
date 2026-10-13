@@ -18,6 +18,7 @@ public static class DependencyInjection
         services.AddSingleton<ImportJobTracker>();
         services.AddSingleton(_ => new ValidationEngine());
         services.AddSingleton<GapFillingService>();
+        services.AddSingleton<ImportMetrics>();
         services.AddHostedService<ImportBackgroundService>();
 
         // Scoped like the repositories they read from.

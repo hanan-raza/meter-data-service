@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using MeterDataService.Application.GapFilling;
 using MeterDataService.Application.Quality;
 using MeterDataService.Domain;
@@ -10,7 +11,8 @@ namespace MeterDataService.Application.Import;
 /// <summary>
 /// Takes queued CSV files off the <see cref="ImportChannel"/> one at a time, parses them, runs the plausibility
 /// checks (Plausibilisierung) and gap filling (Ersatzwertbildung), annotates anomalies, persists the result and
-/// records the outcome with a data-quality score in the <see cref="ImportJobTracker"/>.
+/// records the outcome with a data-quality score in the <see cref="ImportJobTracker"/> and throughput in
+/// <see cref="ImportMetrics"/>.
 /// </summary>
 /// <remarks>
 /// Uploads only enqueue, so a slow or large import never holds an HTTP request open. Jobs are processed
@@ -23,6 +25,7 @@ public sealed partial class ImportBackgroundService(
     GapFillingService gapFillingService,
     IAnomalyDetector anomalyDetector,
     IServiceScopeFactory scopeFactory,
+    ImportMetrics metrics,
     ILogger<ImportBackgroundService> logger) : BackgroundService
 {
     public const string FailureMessage = "Import failed unexpectedly. The server log has the details for this job id.";
@@ -53,17 +56,21 @@ public sealed partial class ImportBackgroundService(
             ["MarketLocationId"] = job.MarketLocationId,
         });
 
+        var started = Stopwatch.GetTimestamp();
         try
         {
             tracker.MarkProcessing(job.Id);
             var (summary, error) = await ImportAsync(job, cancellationToken);
             if (summary is null)
             {
+                metrics.RecordJob(Stopwatch.GetElapsedTime(started), "refused");
                 LogImportRefused(job.FileName, error);
                 tracker.MarkFailed(job.Id, error);
                 return;
             }
 
+            metrics.RecordValues(summary);
+            metrics.RecordJob(Stopwatch.GetElapsedTime(started), "completed");
             tracker.MarkCompleted(job.Id, summary);
             LogImportCompleted(job.FileName, summary.RowsRead, summary.ParseErrors, summary.Accepted, summary.Rejected, summary.MissingIntervals, summary.Substituted, summary.Anomalies, summary.QualityScore);
         }
@@ -71,6 +78,7 @@ public sealed partial class ImportBackgroundService(
         catch (Exception ex)
 #pragma warning restore CA1031
         {
+            metrics.RecordJob(Stopwatch.GetElapsedTime(started), "failed");
             LogImportFailed(ex, job.FileName);
             if (tracker.Find(job.Id) is not null)
             {

@@ -6,6 +6,7 @@ using MeterDataService.Application.Import;
 using MeterDataService.Application.Quality;
 using MeterDataService.Domain;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Diagnostics.Metrics.Testing;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Shouldly;
@@ -24,6 +25,7 @@ public sealed class ImportBackgroundServiceTests : IDisposable
 
     private readonly FakeMeasurementSeriesRepository _repository = new();
     private readonly FakeAnomalyDetector _detector = new();
+    private readonly FakeMeterFactory _meterFactory = new();
     private readonly ServiceProvider _services;
 
     public ImportBackgroundServiceTests()
@@ -33,7 +35,11 @@ public sealed class ImportBackgroundServiceTests : IDisposable
             .BuildServiceProvider();
     }
 
-    public void Dispose() => _services.Dispose();
+    public void Dispose()
+    {
+        _services.Dispose();
+        _meterFactory.Dispose();
+    }
 
     [Fact]
     public async Task Queued_job_is_validated_gap_filled_persisted_and_completed_with_a_summary()
@@ -161,6 +167,63 @@ public sealed class ImportBackgroundServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Importing_96_values_increments_the_values_counter_by_96()
+    {
+        using var values = Collect<long>(ImportMetrics.ValuesImported);
+        Enqueue(DayCsv());
+
+        await RunUntilChannelIsDrained();
+
+        var snapshot = values.GetMeasurementSnapshot();
+        snapshot.Where(m => m.MatchesTags(new KeyValuePair<string, object?>(ImportMetrics.OutcomeTag, "accepted")))
+            .Sum(m => m.Value).ShouldBe(96);
+        snapshot.Where(m => m.MatchesTags(new KeyValuePair<string, object?>(ImportMetrics.OutcomeTag, "rejected")))
+            .Sum(m => m.Value).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Rejected_readings_are_counted_separately_from_accepted_ones()
+    {
+        using var values = Collect<long>(ImportMetrics.ValuesImported);
+        Enqueue(DayCsv(spike: At(12, 0)));
+
+        await RunUntilChannelIsDrained();
+
+        values.GetMeasurementSnapshot().Sum(m => m.Value).ShouldBe(96);
+        values.GetMeasurementSnapshot()
+            .Single(m => m.MatchesTags(new KeyValuePair<string, object?>(ImportMetrics.OutcomeTag, "rejected")))
+            .Value.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Each_job_records_its_duration_tagged_with_the_result()
+    {
+        using var duration = Collect<double>(ImportMetrics.JobDuration);
+        _fakeChannel.Writer.TryWrite(ImportChannelTests.Job()); // untracked, so processing it throws
+        Enqueue(DayCsv());
+
+        await RunUntilChannelIsDrained();
+
+        var jobs = duration.GetMeasurementSnapshot();
+        jobs.Select(m => m.Tags[ImportMetrics.ResultTag] as string).ShouldBe(["failed", "completed"]);
+        jobs.ShouldAllBe(m => m.Value >= 0);
+    }
+
+    [Fact]
+    public async Task Refused_job_records_its_duration_but_no_values()
+    {
+        _repository.Known = false;
+        using var values = Collect<long>(ImportMetrics.ValuesImported);
+        using var duration = Collect<double>(ImportMetrics.JobDuration);
+        Enqueue(DayCsv());
+
+        await RunUntilChannelIsDrained();
+
+        values.GetMeasurementSnapshot().ShouldBeEmpty();
+        duration.LastMeasurement.ShouldNotBeNull().Tags[ImportMetrics.ResultTag].ShouldBe("refused");
+    }
+
+    [Fact]
     public async Task Stops_cleanly_when_the_host_shuts_down_while_waiting_for_jobs()
     {
         using var service = CreateService();
@@ -212,15 +275,22 @@ public sealed class ImportBackgroundServiceTests : IDisposable
         await service.ExecuteTask.ShouldNotBeNull().WaitAsync(Timeout);
     }
 
-    private ImportBackgroundService CreateService() =>
-        new(
-            new ImportChannel(_fakeChannel),
+    private ImportBackgroundService CreateService()
+    {
+        var channel = new ImportChannel(_fakeChannel);
+        return new(
+            channel,
             _tracker,
             new ValidationEngine(),
             new GapFillingService(NullLogger<GapFillingService>.Instance),
             _detector,
             _services.GetRequiredService<IServiceScopeFactory>(),
+            new ImportMetrics(_meterFactory, channel),
             NullLogger<ImportBackgroundService>.Instance);
+    }
+
+    private MetricCollector<T> Collect<T>(string instrument)
+        where T : struct => new(_meterFactory, ImportMetrics.MeterName, instrument);
 
     /// <summary>Flags the configured intervals as spikes and records the periods it was asked about.</summary>
     private sealed class FakeAnomalyDetector : IAnomalyDetector
