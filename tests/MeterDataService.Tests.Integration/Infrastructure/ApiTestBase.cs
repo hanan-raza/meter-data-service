@@ -17,8 +17,10 @@ public abstract class ApiTestBase : IntegrationTestBase, IDisposable
     protected ApiTestBase(PostgreSqlFixture database)
         : base(database)
     {
-        Factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
-            builder.UseSetting("ConnectionStrings:MeterData", database.ConnectionString));
+        // Without the console exporter: metrics stay observable through IMeterFactory but don't flood test output.
+        Factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder => builder
+            .UseSetting("ConnectionStrings:MeterData", database.ConnectionString)
+            .UseSetting("OpenTelemetry:ConsoleExporter", "false"));
     }
 
     protected WebApplicationFactory<Program> Factory { get; }

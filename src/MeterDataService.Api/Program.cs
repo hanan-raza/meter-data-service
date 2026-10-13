@@ -1,7 +1,10 @@
 using System.Text.Json.Serialization;
 using MeterDataService.Application;
+using MeterDataService.Application.Import;
 using MeterDataService.Infrastructure;
 using MeterDataService.Infrastructure.Persistence;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
 using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -22,6 +25,21 @@ builder.Services.AddOpenApi(options => options.AddDocumentTransformer((document,
         "All days are German calendar days (Europe/Berlin), so a day has 92, 96 or 100 intervals.";
     return Task.CompletedTask;
 }));
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService("meter-data-service"))
+    .WithMetrics(metrics =>
+    {
+        metrics.AddAspNetCoreInstrumentation().AddMeter(ImportMetrics.MeterName);
+
+        // The console is a local stand-in for a real backend (OTLP collector, Prometheus); off unless configured.
+        if (builder.Configuration.GetValue<bool>("OpenTelemetry:ConsoleExporter"))
+        {
+            var interval = builder.Configuration.GetValue("OpenTelemetry:ExportIntervalSeconds", 10);
+            metrics.AddConsoleExporter((_, reader) =>
+                reader.PeriodicExportingMetricReaderOptions.ExportIntervalMilliseconds = interval * 1000);
+        }
+    });
 
 var app = builder.Build();
 

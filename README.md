@@ -224,6 +224,18 @@ The tuning comes from synthetic profiles: a 1.5× shift in a household profile i
 
 See [ADR 0002](docs/adr/0002-aggregation-in-sql-with-german-time-buckets.md).
 
+### Metrics (OpenTelemetry)
+
+`ImportMetrics` (`MeterDataService.Application`) publishes the import pipeline's throughput on the meter `MeterDataService.Import`, created through `IMeterFactory`:
+
+| Instrument | Type | Unit | Tags | Meaning |
+|------------|------|------|------|---------|
+| `meterdata.import.values` | Counter | `{value}` | `meterdata.validation.outcome` = `accepted` / `rejected` | Readings read from imported files |
+| `meterdata.import.duration` | Histogram | `s` | `meterdata.import.result` = `completed` / `refused` / `failed` | Time per import job, from dequeue to persisted result |
+| `meterdata.import.queue.depth` | Observable gauge | `{job}` | – | Jobs waiting in the import channel, read at export time |
+
+The API exports these together with the ASP.NET Core HTTP server metrics via OpenTelemetry (resource `service.name = meter-data-service`). In Development the console exporter prints every 10 seconds (`OpenTelemetry:ConsoleExporter`, `OpenTelemetry:ExportIntervalSeconds`); in production it would be swapped for an OTLP or Prometheus exporter without touching the instruments. A refused job (unknown market location) records a duration but no values, since nothing was stored.
+
 ### REST API
 
 | Method | Path | Returns |
@@ -357,6 +369,7 @@ Coverage highlights:
 - OpenAPI: every endpoint is in `/openapi/v1.json` with a summary, a success and an error response; parameter and schema descriptions come from the XML comments; the Scalar page is served in Development
 - Anomaly detection (ML.NET, unit): two injected spikes produce `Spike` annotations at exactly those intervals; a tripled base load and a 1.5× household load give a `ChangePoint` within two hours of the shift; no findings on clean commercial, constant or household series (daily shape not flagged); at most one finding in three clean weeks for five seeds; no change points across the week after the spring-forward day (local-time comparison); no change points without a week of history; zero-fallback placeholders and history days are not annotated; a second run gives identical annotations and replaces the first
 - Data-quality score (unit): 100 for a complete metered day; a mixed day (metered, replaced, estimated, missing, anomalies) gives the hand-calculated 75.52; 92 / 100 expected intervals on DST days; anomaly points per day and never negative; empty day 0; values and annotations outside the period ignored; identical input (in any order) gives an identical score
+- Metrics (unit, `FakeMeterFactory` + `MetricCollector`): importing 96 values increments `meterdata.import.values` by exactly 96 (accepted) and 0 (rejected); a rejected spike is counted apart; each job records a duration tagged `completed`, `refused` or `failed`; a refused job counts no values; the queue-depth gauge reports the waiting jobs. In the API host, an uploaded file is counted on the meter that OpenTelemetry exports.
 - Annotations (unit + PostgreSQL): score range and scale guarded; clearing removes only the half-open range; annotations in range are loaded with the series and replaced findings are deleted on save; the import summary carries anomalies and quality score
 
 ---
@@ -383,4 +396,4 @@ See `docs/adr/` for Architecture Decision Records.
 
 ## Kurzfassung auf Deutsch
 
-Dieser Dienst implementiert die Kernfunktionen eines Messdatenmanagement-Systems (MDM) für den deutschen Energiemarkt. Rohdaten aus 15-Minuten-Intervallzählungen werden über eine CSV-Importpipeline eingelesen, gegen Plausibilitätsregeln geprüft und mit Statusinformationen (gemessen, geschätzt, ersetzt) versehen. Fehlende Werte werden durch Ersatzwertbildung aufgefüllt — kurze Lücken durch lineare Interpolation, längere durch das Vergleichstagverfahren (gleicher Tagestyp der letzten 14 Tage). Jede Ersetzung ist vollständig rückverfolgbar: Verfahren, Stützwerte bzw. Vergleichstag werden je Wert gespeichert. Bei jedem Import markiert eine ML.NET-basierte Anomalieerkennung Ausreißer und Strukturbrüche im Lastgang als Vermerke, ohne die Werte zu verändern, und ein nachvollziehbarer Datenqualitäts-Score (0–100) bewertet die importierten Tage. Jeder Import wird samt Ersatzwerten in einer Transaktion gespeichert; eine spätere Lieferung ersetzt frühere Werte. Aggregierte Verbrauchswerte (stündlich, täglich, monatlich) pro Marktlokation werden exakt als `numeric`-Summen in PostgreSQL berechnet, mit Tages- und Monatsgrenzen in deutscher Zeit. Eine dokumentierte REST-API (OpenAPI, Scalar) liefert Stammdaten, den Lastgang mit Status und Ersatzwert-Herkunft je Intervall sowie Verbrauchsberichte mit Vollständigkeitsgrad. Zeitzonenkorrektheit für die Mitteleuropäische Zeitzone (MEZ/MESZ) — insbesondere die 23- und 25-Stunden-Tage — wird durch dedizierte Tests abgesichert.
+Dieser Dienst implementiert die Kernfunktionen eines Messdatenmanagement-Systems (MDM) für den deutschen Energiemarkt. Rohdaten aus 15-Minuten-Intervallzählungen werden über eine CSV-Importpipeline eingelesen, gegen Plausibilitätsregeln geprüft und mit Statusinformationen (gemessen, geschätzt, ersetzt) versehen. Fehlende Werte werden durch Ersatzwertbildung aufgefüllt — kurze Lücken durch lineare Interpolation, längere durch das Vergleichstagverfahren (gleicher Tagestyp der letzten 14 Tage). Jede Ersetzung ist vollständig rückverfolgbar: Verfahren, Stützwerte bzw. Vergleichstag werden je Wert gespeichert. Bei jedem Import markiert eine ML.NET-basierte Anomalieerkennung Ausreißer und Strukturbrüche im Lastgang als Vermerke, ohne die Werte zu verändern, und ein nachvollziehbarer Datenqualitäts-Score (0–100) bewertet die importierten Tage. Jeder Import wird samt Ersatzwerten in einer Transaktion gespeichert; eine spätere Lieferung ersetzt frühere Werte. Durchsatz, Verarbeitungsdauer und Warteschlangenlänge der Importe werden als OpenTelemetry-Metriken exportiert. Aggregierte Verbrauchswerte (stündlich, täglich, monatlich) pro Marktlokation werden exakt als `numeric`-Summen in PostgreSQL berechnet, mit Tages- und Monatsgrenzen in deutscher Zeit. Eine dokumentierte REST-API (OpenAPI, Scalar) liefert Stammdaten, den Lastgang mit Status und Ersatzwert-Herkunft je Intervall sowie Verbrauchsberichte mit Vollständigkeitsgrad. Zeitzonenkorrektheit für die Mitteleuropäische Zeitzone (MEZ/MESZ) — insbesondere die 23- und 25-Stunden-Tage — wird durch dedizierte Tests abgesichert.

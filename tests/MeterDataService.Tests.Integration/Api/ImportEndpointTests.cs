@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
@@ -10,7 +11,9 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Diagnostics.Metrics.Testing;
 using Microsoft.Extensions.Hosting;
+using OpenTelemetry.Metrics;
 using Shouldly;
 
 namespace MeterDataService.Tests.Integration.Api;
@@ -39,6 +42,24 @@ public sealed class ImportEndpointTests(PostgreSqlFixture database) : ApiTestBas
         finished.Summary.ShouldBe(new ImportSummary(
             RowsRead: 96, ParseErrors: 0, Accepted: 96, Rejected: 0, MissingIntervals: 0, Findings: 0, Substituted: 0,
             Anomalies: 0, QualityScore: 100m));
+    }
+
+    [SkippableFact]
+    public async Task Processed_upload_is_counted_by_the_import_metrics_that_OpenTelemetry_exports()
+    {
+        using var client = Factory.CreateClient();
+        Factory.Services.GetService<MeterProvider>().ShouldNotBeNull();
+        var meterFactory = Factory.Services.GetRequiredService<IMeterFactory>();
+        using var values = new MetricCollector<long>(meterFactory, ImportMetrics.MeterName, ImportMetrics.ValuesImported);
+        using var duration = new MetricCollector<double>(meterFactory, ImportMetrics.MeterName, ImportMetrics.JobDuration);
+
+        using var response = await client.PostAsync(new Uri("/api/import", UriKind.Relative), Form(OneDayCsv(), ValidMaLo));
+        (await PollUntilFinished(client, response.Headers.Location.ShouldNotBeNull())).State.ShouldBe(ImportJobState.Completed);
+
+        values.GetMeasurementSnapshot()
+            .Single(m => m.MatchesTags(new KeyValuePair<string, object?>(ImportMetrics.OutcomeTag, "accepted")))
+            .Value.ShouldBe(96);
+        duration.LastMeasurement.ShouldNotBeNull().Tags[ImportMetrics.ResultTag].ShouldBe("completed");
     }
 
     [SkippableFact]
