@@ -351,7 +351,7 @@ Coverage highlights:
 - Domain invariants: MaLo check digit, MeLo format, meter exchange rules, 15-minute alignment
 - Persistence model: column types (`numeric(18,5)`, `timestamptz`), unique keys, migrations in sync with the model — checked without a database
 - Against real PostgreSQL: migrations apply to an empty database; a `MeasurementValue` round-trips with all 5 decimals and a UTC timestamp; the repeated local 02:00 hour on the fall-back day is stored as two distinct intervals
-- DST transition correctness: 23-hour and 25-hour days. The synthetic generator yields 96 / 92 / 100 intervals for a normal / spring-forward / fall-back day for all three profiles.
+- DST transition correctness: 23-hour and 25-hour days. The synthetic generator yields 96 / 92 / 100 intervals for a normal / spring-forward / fall-back day for all three profiles. Dedicated suites (`Tests.Unit/Dst/`) run both transition days through the real import pipeline: the spring-forward day has 92 intervals and no gap for the skipped hour; four missing intervals before, across or after the jump are one gap of one real hour and are interpolated; nonexistent local times are parse errors and a 96-row file still imports. The fall-back day has 100 intervals; the repeated hour (local times or explicit offsets, in any order) gives two distinct intervals instead of duplicates; a real duplicate is rejected; a 96-row file gets its missing winter-time pass interpolated. See [docs/dst-handling.md](docs/dst-handling.md).
 - Synthetic profiles: H0 annual energy matches the requested consumption, PV is zero at night and stays centred on solar noon across the clock change, gap and spike rates match the configured probabilities
 - CSV import: offset and local timestamps, the repeated hour on the fall-back day (100 rows → 100 distinct UTC intervals), skipped spring local times, per-line errors, semicolon + decimal comma
 - Validation: all rule types (negative, spike, duplicate, outside period, missing intervals, DST interval count). A known spike in a CSV is rejected, a gap gives the exact missing-interval count, a 96-row fall-back day is flagged. Every spike injected by the synthetic generator is rejected, with no false positives on clean household, commercial and PV series (incl. sunrise ramps).
@@ -376,7 +376,7 @@ Coverage highlights:
 
 ## Design Decisions
 
-See `docs/adr/` for Architecture Decision Records.
+See `docs/adr/` for Architecture Decision Records, and [docs/dst-handling.md](docs/dst-handling.md) for how 23- and 25-hour days are handled from CSV import to API output (UTC instants as keys, German calendar days as periods).
 
 - [ADR 0001 — Persistence model for interval meter data](docs/adr/0001-persistence-model-for-interval-data.md): `decimal(18,5)`, UTC `timestamptz`, UUIDv7 keys, 1:n MaLo–MeLo simplification
 - [ADR 0002 — Aggregation in SQL with German-time buckets](docs/adr/0002-aggregation-in-sql-with-german-time-buckets.md): exact `numeric` sums in PostgreSQL, days/months cut in `Europe/Berlin`, hours in UTC so the repeated hour stays two buckets
