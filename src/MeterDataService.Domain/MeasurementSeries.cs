@@ -21,6 +21,11 @@ public sealed class MeasurementSeries
     private readonly List<MeasurementValue> _values = [];
     private readonly List<SeriesAnnotation> _annotations = [];
 
+    // Lookup by interval for Record and Substitute; a linear search made importing a week into a series with
+    // its lookback history quadratic. Not mapped: EF Core fills _values directly, so the index catches up lazily.
+    private readonly Dictionary<DateTimeOffset, MeasurementValue> _valuesByStart = [];
+    private int _indexedCount;
+
     // Required by EF Core for materialization.
     private MeasurementSeries()
     {
@@ -66,7 +71,7 @@ public sealed class MeasurementSeries
     public MeasurementValue Record(DateTimeOffset intervalStart, decimal value, MeasurementStatus status)
     {
         var utc = intervalStart.ToUniversalTime();
-        var existing = _values.Find(v => v.IntervalStart == utc);
+        var existing = Find(utc);
         if (existing is null)
         {
             return AddValue(utc, value, status);
@@ -93,10 +98,29 @@ public sealed class MeasurementSeries
         ArgumentNullException.ThrowIfNull(trace);
 
         var utc = intervalStart.ToUniversalTime();
-        var measurement = _values.Find(v => v.IntervalStart == utc)
+        var measurement = Find(utc)
             ?? AddValue(utc, value, trace.ResultingStatus);
         measurement.Replace(value, trace);
         return measurement;
+    }
+
+    /// <summary>The first value stored for the interval, as a linear search over <see cref="Values"/> would find it.</summary>
+    private MeasurementValue? Find(DateTimeOffset utc)
+    {
+        if (_indexedCount > _values.Count)
+        {
+            // Values were removed behind our back (e.g. by EF Core); start over rather than trust stale entries.
+            _valuesByStart.Clear();
+            _indexedCount = 0;
+        }
+
+        // TryAdd keeps the first of any duplicates, matching List.Find.
+        for (; _indexedCount < _values.Count; _indexedCount++)
+        {
+            _valuesByStart.TryAdd(_values[_indexedCount].IntervalStart, _values[_indexedCount]);
+        }
+
+        return _valuesByStart.GetValueOrDefault(utc);
     }
 
     public SeriesAnnotation Annotate(DateTimeOffset intervalStart, AnomalyType type, decimal score)

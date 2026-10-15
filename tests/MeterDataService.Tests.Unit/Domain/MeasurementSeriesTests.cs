@@ -1,3 +1,4 @@
+using System.Reflection;
 using MeterDataService.Domain;
 using Shouldly;
 
@@ -103,6 +104,52 @@ public class MeasurementSeriesTests
         Should.Throw<ArgumentException>(() => series.Record(Noon, 0.123456m, MeasurementStatus.Measured));
     }
 
+    [Fact]
+    public void Record_finds_values_added_after_an_earlier_lookup()
+    {
+        var series = NewSeries();
+        series.Record(Noon, 0.25m, MeasurementStatus.Measured);
+        var added = series.AddValue(Noon.AddMinutes(15), 0.5m, MeasurementStatus.Measured);
+
+        series.Record(Noon.AddMinutes(15), 0.6m, MeasurementStatus.Measured).ShouldBeSameAs(added);
+        series.Values.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void Record_overwrites_the_first_of_duplicate_values()
+    {
+        var series = NewSeries();
+        var first = series.AddValue(Noon, 0.25m, MeasurementStatus.Measured);
+        var second = series.AddValue(Noon, 0.5m, MeasurementStatus.Measured);
+
+        series.Record(Noon, 0.3m, MeasurementStatus.Measured).ShouldBeSameAs(first);
+        second.Value.ShouldBe(0.5m);
+    }
+
+    [Fact]
+    public void Substitute_finds_values_loaded_straight_into_the_backing_list()
+    {
+        // EF Core materializes values into the field, bypassing AddValue.
+        var series = NewSeries();
+        series.Record(Noon, 0.25m, MeasurementStatus.Measured);
+        var loaded = new MeasurementValue(series.Id, Noon.AddMinutes(15), 0.5m, MeasurementStatus.Measured);
+        ValuesField(series).Add(loaded);
+
+        series.Substitute(Noon.AddMinutes(15), 0.4m, ReplacementTrace.LinearInterpolation(0.25m, 0.5m)).ShouldBeSameAs(loaded);
+        series.Values.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void Record_does_not_return_a_value_removed_from_the_backing_list()
+    {
+        var series = NewSeries();
+        var removed = series.Record(Noon, 0.25m, MeasurementStatus.Measured);
+        ValuesField(series).Remove(removed);
+
+        series.Record(Noon, 0.3m, MeasurementStatus.Measured).ShouldNotBeSameAs(removed);
+        series.Values.Count.ShouldBe(1);
+    }
+
     [Theory]
     [InlineData(EnergyDirection.Consumption, "1-1:1.29.0")]
     [InlineData(EnergyDirection.Generation, "1-1:2.29.0")]
@@ -113,4 +160,9 @@ public class MeasurementSeriesTests
         new MarketLocation("41373559241", EnergyDirection.Consumption)
             .AddMeterLocation("DE0001234567890000000000000000001")
             .AddSeries(MeasurementSeries.ConsumedActiveEnergy);
+
+    private static List<MeasurementValue> ValuesField(MeasurementSeries series) =>
+        (List<MeasurementValue>)typeof(MeasurementSeries)
+            .GetField("_values", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(series)!;
 }

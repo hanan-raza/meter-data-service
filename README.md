@@ -26,6 +26,7 @@ Every import also runs ML.NET anomaly detection over the delivered days and rate
 - Anomaly detection: ML.NET spike and change-point detection, stored as annotations per interval, plus an explainable data-quality score (0–100) per import
 - Background ingestion via `Channel<T>` and `BackgroundService`
 - OpenTelemetry metrics for import throughput
+- BenchmarkDotNet import benchmarks: one week (672 intervals) through parse → validate → gap fill in ~2.6 ms, ~11 ms including ML.NET
 
 ---
 
@@ -371,12 +372,21 @@ Coverage highlights:
 - Data-quality score (unit): 100 for a complete metered day; a mixed day (metered, replaced, estimated, missing, anomalies) gives the hand-calculated 75.52; 92 / 100 expected intervals on DST days; anomaly points per day and never negative; empty day 0; values and annotations outside the period ignored; identical input (in any order) gives an identical score
 - Metrics (unit, `FakeMeterFactory` + `MetricCollector`): importing 96 values increments `meterdata.import.values` by exactly 96 (accepted) and 0 (rejected); a rejected spike is counted apart; each job records a duration tagged `completed`, `refused` or `failed`; a refused job counts no values; the queue-depth gauge reports the waiting jobs. In the API host, an uploaded file is counted on the meter that OpenTelemetry exports.
 - Annotations (unit + PostgreSQL): score range and scale guarded; clearing removes only the half-open range; annotations in range are loaded with the series and replaced findings are deleted on save; the import summary carries anomalies and quality score
+- Series lookup (unit): `Record` and `Substitute` find values by interval through an index that catches up with values added later or loaded straight into the backing list (as EF Core does); the first of duplicate values wins, as before
+
+### Benchmarks
+
+```bash
+dotnet run -c Release --project benchmarks/MeterDataService.Benchmarks -- --filter '*'
+```
+
+One deterministic household week (672 intervals, with short and long gaps and a spike) is imported against an in-memory repository holding the 14 lookback days. Measured: each step on its own, the core pipeline (parse → validate → gap fill → repository), and the real `ImportBackgroundService` including ML.NET. The setup checks the import counts before measuring. The first run found `MeasurementSeries.Record` doing a linear search per value (quadratic per import); an interval index made the pipeline 2.4× faster (6.2 → 2.6 ms). Numbers and analysis are in [docs/benchmarks.md](docs/benchmarks.md).
 
 ---
 
 ## Design Decisions
 
-See `docs/adr/` for Architecture Decision Records, and [docs/dst-handling.md](docs/dst-handling.md) for how 23- and 25-hour days are handled from CSV import to API output (UTC instants as keys, German calendar days as periods).
+See `docs/adr/` for Architecture Decision Records, and [docs/dst-handling.md](docs/dst-handling.md) for how 23- and 25-hour days are handled from CSV import to API output (UTC instants as keys, German calendar days as periods). [docs/benchmarks.md](docs/benchmarks.md) records the import benchmark baseline and why `MeasurementSeries` keeps an interval index next to its value list.
 
 - [ADR 0001 — Persistence model for interval meter data](docs/adr/0001-persistence-model-for-interval-data.md): `decimal(18,5)`, UTC `timestamptz`, UUIDv7 keys, 1:n MaLo–MeLo simplification
 - [ADR 0002 — Aggregation in SQL with German-time buckets](docs/adr/0002-aggregation-in-sql-with-german-time-buckets.md): exact `numeric` sums in PostgreSQL, days/months cut in `Europe/Berlin`, hours in UTC so the repeated hour stays two buckets
@@ -389,7 +399,7 @@ See `docs/adr/` for Architecture Decision Records, and [docs/dst-handling.md](do
 - Authentication and per-tenant access to market locations
 - Treat public holidays (bundeseinheitlich and per federal state) as Sundays in similar-day selection
 - MSCONS import from `edifact-energy-parser` (cross-project)
-- BenchmarkDotNet import speed benchmarks
+- Move ML.NET anomaly detection to its own queue after the import commits, for high-volume bulk loads (it is ~75 % of the import time, see [docs/benchmarks.md](docs/benchmarks.md))
 - Prometheus/Grafana dashboard for the OpenTelemetry metrics
 
 ---
