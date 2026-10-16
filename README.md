@@ -32,22 +32,79 @@ Every import also runs ML.NET anomaly detection over the delivered days and rate
 
 ## Innovation
 
-_TODO: expand after implementation_
+Most meter data tools stop at "the gap was filled". This service also stores how each value came about, and shows it:
+
+- **Every substitute can be recomputed from its own row.** A `Replaced` value stores its method plus the two anchor values (interpolation) or the source day (similar day). The API returns this trace per interval, so a disputed 15-minute value can be explained without opening a log or rerunning anything.
+- **Anomaly detection that knows what a load profile looks like.** A raw household profile ramps up every morning, which naive change-point detection flags every day. Here change points run on the difference to the same local time one week earlier, which removes the daily and weekly shape. The comparison is by wall-clock time, so the week after a clock change compares 18:00 with 18:00. Findings are annotations; values are never changed by a model.
+- **A data-quality score you can check by hand.** It is 0–100, built from counts in `decimal` (metered share, substitution share, anomalies per day) and returned with the counts it came from. The same data always gives the same score.
+- **Ingestion with back-pressure.** A bounded `Channel<T>` answers `503 Retry-After` when full instead of buffering without limit. One reader keeps deliveries for a market location in order, and each file is saved in one transaction.
+- **DST-correct from end to end.** 92 / 96 / 100 intervals per day, the repeated 02:00 hour as two distinct intervals and two hourly buckets, and German calendar days as the only period unit in the API. Dedicated test suites back all of it.
+- **Measured, not guessed.** OpenTelemetry metrics for throughput and queue depth, and a BenchmarkDotNet suite that found and removed a quadratic lookup in the import.
 
 ---
 
 ## Architecture
 
 ```mermaid
-graph TD
-    A[CSV Import] --> B[ImportPipeline BackgroundService]
-    B --> C[ValidationEngine]
-    C --> D[GapFillingService]
-    D --> G[AnomalyDetector ML.NET]
-    G --> H[DataQualityScorer]
-    H --> E[PostgreSQL via EF Core]
-    E --> F[REST API: market locations, measurements, consumption]
+flowchart TD
+    client(["Client: curl, .http file, Scalar UI"])
+
+    subgraph api["MeterDataService.Api"]
+        importCtl["ImportController<br/>POST /api/import, GET /api/import/{id}"]
+        readCtl["MarketLocation-, Measurement-,<br/>ConsumptionController"]
+        otel["OpenTelemetry metrics exporter"]
+    end
+
+    subgraph app["MeterDataService.Application"]
+        channel[["ImportChannel<br/>bounded Channel#60;ImportJob#62;, capacity 100"]]
+        tracker["ImportJobTracker<br/>job state + summary, in memory"]
+        worker["ImportBackgroundService<br/>one job at a time, DI scope per job"]
+        parser["CsvImportParser"]
+        validation["ValidationEngine"]
+        gapFill["GapFillingService<br/>GapDetector → LinearInterpolationFiller → SimilarDayFiller"]
+        scorer["DataQualityScorer"]
+        metrics["ImportMetrics"]
+        queries["MeasurementQueryService,<br/>ConsumptionQueryService"]
+    end
+
+    subgraph infra["MeterDataService.Infrastructure"]
+        detector["AnomalyDetector<br/>ML.NET spike + change point"]
+        seriesRepo["MeasurementSeriesRepository"]
+        readRepos["MarketLocationReadRepository,<br/>MeasurementReadRepository,<br/>AggregationRepository"]
+    end
+
+    db[("PostgreSQL 17<br/>EF Core, numeric(18,5), timestamptz")]
+
+    client -->|"multipart CSV"| importCtl
+    importCtl -->|MarkQueued| tracker
+    importCtl -->|"TryEnqueue, full → 503"| channel
+    channel -->|ReadAllAsync| worker
+    worker -->|"1 parse"| parser
+    worker -->|"2 validate"| validation
+    worker -->|"3 load period + 14 lookback days"| seriesRepo
+    worker -->|"4 fill gaps"| gapFill
+    worker -->|"5 annotate via IAnomalyDetector"| detector
+    worker -->|"6 score"| scorer
+    worker -->|"7 save in one transaction"| seriesRepo
+    worker -->|"Completed / Failed + counts"| tracker
+    worker --> metrics
+    metrics --> otel
+    seriesRepo --> db
+
+    client -->|"GET market locations, measurements, consumption"| readCtl
+    readCtl -->|"series, consumption"| queries
+    readCtl -->|"master data"| readRepos
+    queries --> readRepos
+    readRepos --> db
 ```
+
+The solution follows a light Clean Architecture with three dependency rules:
+
+- **Domain** (`MarketLocation`, `MeterLocation`, `Meter`, `MeasurementSeries`, `MeasurementValue`, `SeriesAnnotation`, `GermanCalendar`) has no dependencies. Its entities guard their own invariants.
+- **Application** holds the import pipeline, gap filling, quality scoring and query services. It defines the interfaces it needs (`IMeasurementSeriesRepository`, `IAnomalyDetector`, the read repositories) and doesn't know EF Core or ML.NET.
+- **Infrastructure** implements those interfaces with EF Core/Npgsql and ML.NET. **Api** wires everything together and only translates HTTP to application calls.
+
+Gap filling and scoring are pure in-memory work on the loaded `MeasurementSeries`, so they are unit-tested without a database. Only loading, saving and the SQL aggregation need PostgreSQL. Why PostgreSQL: [ADR 0004](docs/adr/0004-postgresql-over-sqlserver.md). Why a channel instead of a broker: [ADR 0005](docs/adr/0005-channel-background-service.md).
 
 ### Data model
 
@@ -391,6 +448,8 @@ See `docs/adr/` for Architecture Decision Records, and [docs/dst-handling.md](do
 - [ADR 0001 — Persistence model for interval meter data](docs/adr/0001-persistence-model-for-interval-data.md): `decimal(18,5)`, UTC `timestamptz`, UUIDv7 keys, 1:n MaLo–MeLo simplification
 - [ADR 0002 — Aggregation in SQL with German-time buckets](docs/adr/0002-aggregation-in-sql-with-german-time-buckets.md): exact `numeric` sums in PostgreSQL, days/months cut in `Europe/Berlin`, hours in UTC so the repeated hour stays two buckets
 - [ADR 0003 — Anomaly detection on week-over-week differences](docs/adr/0003-anomaly-detection-on-week-over-week-differences.md): IID spike on raw values, IID change point on the difference to the same local time a week earlier; findings as annotations, values untouched
+- [ADR 0004 — PostgreSQL over SQL Server](docs/adr/0004-postgresql-over-sqlserver.md): `date_trunc` with IANA zone names, `timestamptz` as a pure UTC instant, UUIDv7 keys in index order, a light Testcontainers image
+- [ADR 0005 — Import via a bounded `Channel<T>` and one `BackgroundService`](docs/adr/0005-channel-background-service.md): `202` + polling, `503 Retry-After` when full, one reader for per-location ordering; not durable and single-instance by design, with the path to a broker
 
 ---
 
@@ -401,9 +460,10 @@ See `docs/adr/` for Architecture Decision Records, and [docs/dst-handling.md](do
 - MSCONS import from `edifact-energy-parser` (cross-project)
 - Move ML.NET anomaly detection to its own queue after the import commits, for high-volume bulk loads (it is ~75 % of the import time, see [docs/benchmarks.md](docs/benchmarks.md))
 - Prometheus/Grafana dashboard for the OpenTelemetry metrics
+- Durable import queue (broker partitioned by MaLo-ID or a job table) to survive restarts and run several instances (see [ADR 0005](docs/adr/0005-channel-background-service.md))
 
 ---
 
 ## Kurzfassung auf Deutsch
 
-Dieser Dienst implementiert die Kernfunktionen eines Messdatenmanagement-Systems (MDM) für den deutschen Energiemarkt. Rohdaten aus 15-Minuten-Intervallzählungen werden über eine CSV-Importpipeline eingelesen, gegen Plausibilitätsregeln geprüft und mit Statusinformationen (gemessen, geschätzt, ersetzt) versehen. Fehlende Werte werden durch Ersatzwertbildung aufgefüllt — kurze Lücken durch lineare Interpolation, längere durch das Vergleichstagverfahren (gleicher Tagestyp der letzten 14 Tage). Jede Ersetzung ist vollständig rückverfolgbar: Verfahren, Stützwerte bzw. Vergleichstag werden je Wert gespeichert. Bei jedem Import markiert eine ML.NET-basierte Anomalieerkennung Ausreißer und Strukturbrüche im Lastgang als Vermerke, ohne die Werte zu verändern, und ein nachvollziehbarer Datenqualitäts-Score (0–100) bewertet die importierten Tage. Jeder Import wird samt Ersatzwerten in einer Transaktion gespeichert; eine spätere Lieferung ersetzt frühere Werte. Durchsatz, Verarbeitungsdauer und Warteschlangenlänge der Importe werden als OpenTelemetry-Metriken exportiert. Aggregierte Verbrauchswerte (stündlich, täglich, monatlich) pro Marktlokation werden exakt als `numeric`-Summen in PostgreSQL berechnet, mit Tages- und Monatsgrenzen in deutscher Zeit. Eine dokumentierte REST-API (OpenAPI, Scalar) liefert Stammdaten, den Lastgang mit Status und Ersatzwert-Herkunft je Intervall sowie Verbrauchsberichte mit Vollständigkeitsgrad. Zeitzonenkorrektheit für die Mitteleuropäische Zeitzone (MEZ/MESZ) — insbesondere die 23- und 25-Stunden-Tage — wird durch dedizierte Tests abgesichert.
+Dieser Dienst implementiert die Kernfunktionen eines Messdatenmanagement-Systems (MDM) für den deutschen Energiemarkt. Rohdaten aus 15-Minuten-Intervallzählungen werden über eine CSV-Importpipeline eingelesen, gegen Plausibilitätsregeln geprüft und mit Statusinformationen (gemessen, geschätzt, ersetzt) versehen. Fehlende Werte werden durch Ersatzwertbildung aufgefüllt — kurze Lücken durch lineare Interpolation, längere durch das Vergleichstagverfahren (gleicher Tagestyp der letzten 14 Tage) —, wobei Verfahren, Stützwerte bzw. Vergleichstag je Wert gespeichert werden und jede Ersetzung damit vollständig rückverfolgbar ist. Bei jedem Import markiert eine ML.NET-basierte Anomalieerkennung Ausreißer und Strukturbrüche im Lastgang als Vermerke, ohne die Werte zu verändern, und ein nachvollziehbarer Datenqualitäts-Score (0–100) bewertet die importierten Tage. Importe laufen über eine begrenzte `Channel<T>`-Warteschlange im Hintergrund, werden samt Ersatzwerten in einer Transaktion gespeichert (eine spätere Lieferung ersetzt frühere Werte) und als OpenTelemetry-Metriken (Durchsatz, Dauer, Warteschlangenlänge) überwacht. Aggregierte Verbrauchswerte (stündlich, täglich, monatlich) pro Marktlokation werden exakt als `numeric`-Summen in PostgreSQL berechnet, mit Tages- und Monatsgrenzen in deutscher Zeit. Eine dokumentierte REST-API (OpenAPI, Scalar) liefert Stammdaten, den Lastgang mit Status und Ersatzwert-Herkunft je Intervall sowie Verbrauchsberichte mit Vollständigkeitsgrad. Zeitzonenkorrektheit für die Mitteleuropäische Zeitzone (MEZ/MESZ) — insbesondere die 23- und 25-Stunden-Tage — wird durch dedizierte Tests abgesichert.
